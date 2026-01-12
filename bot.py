@@ -3,21 +3,175 @@ from discord.ext import commands
 from discord import app_commands
 import os
 import asyncio
+import httpx
 from dotenv import load_dotenv
+from typing import Optional, Any, Dict, List
 from supabase import create_client, Client
-from openai import AsyncOpenAI
 
 # Load environment variables
 load_dotenv()
 TOKEN = os.getenv('DISCORD_TOKEN')
 SUPABASE_URL = os.getenv('SUPABASE_URL')
-SUPABASE_KEY = os.getenv('SUPABASE_SECRET_KEY')
-OPENAI_API_KEY = os.getenv('OPENAI_API_KEY')
-OPENAI_MODEL = os.getenv('OPENAI_MODEL', 'gpt-4o-mini')
+SUPABASE_KEY = os.getenv('SUPABASE_SERVICE_ROLE_KEY')
+OLLAMA_HOST = os.getenv('OLLAMA_HOST', 'http://localhost:11434')
+OLLAMA_MODEL = os.getenv('OLLAMA_MODEL', 'llama3.2')
+OLLAMA_EMBED_MODEL = os.getenv('OLLAMA_EMBED_MODEL', 'nomic-embed-text')
 
 # Initialize clients
-supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY) if SUPABASE_URL and SUPABASE_KEY else None
-openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
+supabase: Optional[Client] = create_client(SUPABASE_URL, SUPABASE_KEY) if SUPABASE_URL and SUPABASE_KEY else None
+ollama_available = False
+embedding_available = False
+
+
+async def check_ollama():
+    """Check if Ollama is available and which models are loaded."""
+    global ollama_available, embedding_available
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.get(f'{OLLAMA_HOST}/api/tags', timeout=5.0)
+            ollama_available = response.status_code == 200
+            if ollama_available:
+                print(f'Ollama connected at {OLLAMA_HOST}')
+                # Check if embedding model is available
+                data = response.json()
+                models = [m.get('name', '').split(':')[0] for m in data.get('models', [])]
+                if OLLAMA_EMBED_MODEL in models or f'{OLLAMA_EMBED_MODEL}:latest' in [m.get('name', '') for m in data.get('models', [])]:
+                    embedding_available = True
+                    print(f'Embedding model {OLLAMA_EMBED_MODEL} is available')
+                else:
+                    print(f'Embedding model {OLLAMA_EMBED_MODEL} not found. RAG will be disabled.')
+                    print(f'Available models: {models}')
+                    print(f'To enable RAG, run: ollama pull {OLLAMA_EMBED_MODEL}')
+    except Exception as e:
+        print(f'Ollama not available: {e}')
+        ollama_available = False
+
+
+async def ollama_chat(messages: list, model: Optional[str] = None) -> str:
+    """Send chat request to Ollama."""
+    model = model or OLLAMA_MODEL or 'llama3.2'
+    
+    try:
+        async with httpx.AsyncClient(timeout=120.0) as client:
+            response = await client.post(
+                f'{OLLAMA_HOST}/api/chat',
+                json={
+                    'model': model,
+                    'messages': messages,
+                    'stream': False,
+                    'options': {
+                        'temperature': 0.7,
+                        'num_predict': 1000,
+                    }
+                }
+            )
+            response.raise_for_status()
+            data = response.json()
+            return data.get('message', {}).get('content', 'No response generated.')
+    except httpx.TimeoutException:
+        return "Request timed out. The model might be loading or the response is taking too long."
+    except Exception as e:
+        print(f'Ollama error: {e}')
+        return f"Error communicating with Ollama: {str(e)}"
+
+
+async def ollama_embed(text: str) -> Optional[List[float]]:
+    """Generate embeddings using Ollama."""
+    if not embedding_available:
+        return None
+    
+    try:
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            response = await client.post(
+                f'{OLLAMA_HOST}/api/embeddings',
+                json={
+                    'model': OLLAMA_EMBED_MODEL,
+                    'prompt': text
+                }
+            )
+            response.raise_for_status()
+            data = response.json()
+            return data.get('embedding')
+    except Exception as e:
+        print(f'Embedding error: {e}')
+        return None
+
+
+async def search_knowledge_base(query: str, match_count: int = 3) -> List[Dict[str, Any]]:
+    """Search knowledge base for relevant documents using semantic search."""
+    if not supabase or not embedding_available:
+        return []
+    
+    # Generate embedding for the query
+    query_embedding = await ollama_embed(query)
+    if not query_embedding:
+        return []
+    
+    try:
+        # Call the similarity search function
+        result = supabase.rpc('search_documents', {
+            'query_embedding': query_embedding,
+            'match_threshold': 0.5,
+            'match_count': match_count
+        }).execute()
+        
+        if result.data and isinstance(result.data, list):
+            return [dict(row) for row in result.data]  # type: ignore
+    except Exception as e:
+        print(f'Knowledge search error: {e}')
+    
+    return []
+
+
+async def add_document_to_knowledge_base(title: str, content: str, filename: Optional[str] = None) -> bool:
+    """Add a document to the knowledge base with embedding."""
+    if not supabase:
+        return False
+    
+    # Split content into chunks if too long (max ~500 tokens per chunk)
+    max_chunk_size = 2000  # characters
+    chunks = []
+    
+    if len(content) > max_chunk_size:
+        # Simple chunking by paragraphs
+        paragraphs = content.split('\n\n')
+        current_chunk = ""
+        
+        for para in paragraphs:
+            if len(current_chunk) + len(para) < max_chunk_size:
+                current_chunk += para + "\n\n"
+            else:
+                if current_chunk:
+                    chunks.append(current_chunk.strip())
+                current_chunk = para + "\n\n"
+        
+        if current_chunk:
+            chunks.append(current_chunk.strip())
+    else:
+        chunks = [content]
+    
+    try:
+        for i, chunk in enumerate(chunks):
+            # Generate embedding for the chunk
+            embedding = await ollama_embed(chunk) if embedding_available else None
+            
+            doc_data: Dict[str, Any] = {
+                'title': f"{title}" if len(chunks) == 1 else f"{title} (Part {i+1})",
+                'filename': filename,
+                'content': chunk,
+                'chunk_index': i,
+                'metadata': {'total_chunks': len(chunks)}
+            }
+            
+            if embedding:
+                doc_data['embedding'] = embedding
+            
+            supabase.table('knowledge_documents').insert(doc_data).execute()
+        
+        return True
+    except Exception as e:
+        print(f'Error adding document: {e}')
+        return False
 
 # Bot setup with intents
 intents = discord.Intents.default()
@@ -43,10 +197,10 @@ async def fetch_bot_config():
     try:
         result = supabase.table('bot_config').select('*').limit(1).execute()
         if result.data:
-            config = result.data[0]
-            bot_config_cache['system_instructions'] = config.get('system_instructions', '')
-            bot_config_cache['allowed_channels'] = config.get('allowed_channels', [])
-            bot_config_cache['bot_name'] = config.get('bot_name', 'DasAI Assistant')
+            config: Dict[str, Any] = dict(result.data[0])  # type: ignore
+            bot_config_cache['system_instructions'] = str(config.get('system_instructions', ''))
+            bot_config_cache['allowed_channels'] = list(config.get('allowed_channels', []))
+            bot_config_cache['bot_name'] = str(config.get('bot_name', 'DasAI Assistant'))
     except Exception as e:
         print(f'Error fetching config: {e}')
     
@@ -61,7 +215,8 @@ async def get_conversation_memory(channel_id: str) -> str:
     try:
         result = supabase.table('conversation_memory').select('summary').eq('channel_id', channel_id).limit(1).execute()
         if result.data:
-            return result.data[0].get('summary', '')
+            row: Dict[str, Any] = dict(result.data[0])  # type: ignore
+            return str(row.get('summary', ''))
     except Exception as e:
         print(f'Error fetching memory: {e}')
     
@@ -70,19 +225,20 @@ async def get_conversation_memory(channel_id: str) -> str:
 
 async def update_conversation_memory(channel_id: str, new_message: str, bot_response: str):
     """Update conversation memory with new exchange."""
-    if not supabase or not openai_client:
+    if not supabase or not ollama_available:
         return
     
     try:
         # Get existing memory
         existing = supabase.table('conversation_memory').select('*').eq('channel_id', channel_id).limit(1).execute()
         
-        current_summary = ''
-        message_count = 0
+        current_summary: str = ''
+        message_count: int = 0
         
         if existing.data:
-            current_summary = existing.data[0].get('summary', '')
-            message_count = existing.data[0].get('message_count', 0)
+            row: Dict[str, Any] = dict(existing.data[0])  # type: ignore
+            current_summary = str(row.get('summary', ''))
+            message_count = int(row.get('message_count', 0))
         
         # Generate updated summary every 5 messages
         if message_count % 5 == 0 and message_count > 0:
@@ -94,12 +250,7 @@ Assistant: {bot_response}
 
 Create a brief updated summary of the conversation so far (max 200 words):"""
             
-            response = await openai_client.chat.completions.create(
-                model=OPENAI_MODEL,
-                messages=[{'role': 'user', 'content': summary_prompt}],
-                max_tokens=300
-            )
-            current_summary = response.choices[0].message.content
+            current_summary = await ollama_chat([{'role': 'user', 'content': summary_prompt}])
         
         # Upsert memory
         supabase.table('conversation_memory').upsert({
@@ -112,7 +263,7 @@ Create a brief updated summary of the conversation so far (max 200 words):"""
         print(f'Error updating memory: {e}')
 
 
-async def save_message(channel_id: str, user_id: str, username: str, content: str, bot_response: str = None):
+async def save_message(channel_id: str, user_id: str, username: str, content: str, bot_response: Optional[str] = None):
     """Save message to database."""
     if not supabase:
         return
@@ -130,17 +281,34 @@ async def save_message(channel_id: str, user_id: str, username: str, content: st
 
 
 async def generate_ai_response(message: discord.Message, config: dict) -> str:
-    """Generate AI response using OpenAI."""
-    if not openai_client:
-        return "AI is not configured. Please set up the OpenAI API key."
+    """Generate AI response using Ollama with RAG context."""
+    if not ollama_available:
+        return "AI is not configured. Please make sure Ollama is running."
     
     channel_id = str(message.channel.id)
+    user_query = message.content
     
     # Get conversation memory
     memory = await get_conversation_memory(channel_id)
     
+    # Search knowledge base for relevant context (RAG)
+    knowledge_context = ""
+    if embedding_available:
+        relevant_docs = await search_knowledge_base(user_query, match_count=3)
+        if relevant_docs:
+            knowledge_context = "\n\n📚 **Relevant Knowledge Base Context:**\n"
+            for doc in relevant_docs:
+                title = doc.get('title', 'Untitled')
+                content = doc.get('content', '')[:500]  # Limit content length
+                similarity = doc.get('similarity', 0)
+                knowledge_context += f"\n[{title}] (relevance: {similarity:.0%}):\n{content}\n"
+    
     # Build system prompt
     system_prompt = config['system_instructions']
+    
+    if knowledge_context:
+        system_prompt += f"\n\nUse the following knowledge base context to help answer questions when relevant:{knowledge_context}"
+    
     if memory:
         system_prompt += f"\n\nConversation context:\n{memory}"
     
@@ -163,19 +331,9 @@ async def generate_ai_response(message: discord.Message, config: dict) -> str:
         {'role': 'system', 'content': system_prompt}
     ]
     messages.extend(recent_messages[-6:])  # Last 6 messages for context
-    messages.append({'role': 'user', 'content': f"{message.author.display_name}: {message.content}"})
+    messages.append({'role': 'user', 'content': f"{message.author.display_name}: {user_query}"})
     
-    try:
-        response = await openai_client.chat.completions.create(
-            model=OPENAI_MODEL,
-            messages=messages,
-            max_tokens=1000,
-            temperature=0.7
-        )
-        return response.choices[0].message.content
-    except Exception as e:
-        print(f'Error generating response: {e}')
-        return f"Sorry, I encountered an error: {str(e)}"
+    return await ollama_chat(messages)
 
 
 @bot.event
@@ -184,9 +342,13 @@ async def on_ready():
     print(f'{bot.user} has connected to Discord!')
     print(f'Bot is in {len(bot.guilds)} guild(s)')
     
+    # Check Ollama connection
+    await check_ollama()
+    
     # Fetch initial config
     await fetch_bot_config()
-    print(f'Loaded config - Allowed channels: {len(bot_config_cache["allowed_channels"])}')
+    channels_count = len(bot_config_cache["allowed_channels"])
+    print(f'Loaded config - Allowed channels: {"All" if channels_count == 0 else channels_count}')
     
     # Sync slash commands
     try:
@@ -211,7 +373,7 @@ async def on_message(message: discord.Message):
     await bot.process_commands(message)
     
     # Check if this is a command (starts with prefix)
-    if message.content.startswith(bot.command_prefix):
+    if message.content.startswith(str(bot.command_prefix)):
         return
     
     # Refresh config periodically
@@ -279,13 +441,16 @@ async def status(ctx):
     config = bot_config_cache
     embed = discord.Embed(
         title='🤖 DasAI Status',
-        color=discord.Color.green()
+        color=discord.Color.green() if ollama_available else discord.Color.red()
     )
     embed.add_field(name='Bot Name', value=config['bot_name'], inline=True)
     embed.add_field(name='Allowed Channels', value=len(config['allowed_channels']) or 'All', inline=True)
-    embed.add_field(name='AI Model', value=OPENAI_MODEL, inline=True)
+    embed.add_field(name='AI Model', value=OLLAMA_MODEL, inline=True)
+    embed.add_field(name='Embed Model', value=OLLAMA_EMBED_MODEL if embedding_available else 'Not available', inline=True)
+    embed.add_field(name='Ollama Host', value=OLLAMA_HOST, inline=True)
     embed.add_field(name='Database', value='✅ Connected' if supabase else '❌ Not configured', inline=True)
-    embed.add_field(name='OpenAI', value='✅ Connected' if openai_client else '❌ Not configured', inline=True)
+    embed.add_field(name='Ollama', value='✅ Connected' if ollama_available else '❌ Not available', inline=True)
+    embed.add_field(name='RAG/Embeddings', value='✅ Enabled' if embedding_available else '❌ Disabled', inline=True)
     await ctx.send(embed=embed)
 
 
@@ -305,27 +470,145 @@ async def ask(interaction: discord.Interaction, question: str):
     
     config = await fetch_bot_config()
     
-    if not openai_client:
-        await interaction.followup.send("AI is not configured.")
+    if not ollama_available:
+        await interaction.followup.send("AI is not configured. Make sure Ollama is running.")
+        return
+    
+    # Search knowledge base for relevant context
+    knowledge_context = ""
+    if embedding_available:
+        relevant_docs = await search_knowledge_base(question, match_count=3)
+        if relevant_docs:
+            knowledge_context = "\n\nRelevant Knowledge:\n"
+            for doc in relevant_docs:
+                title = doc.get('title', 'Untitled')
+                content = doc.get('content', '')[:500]
+                knowledge_context += f"[{title}]: {content}\n"
+    
+    system_prompt = config['system_instructions']
+    if knowledge_context:
+        system_prompt += f"\n\nUse this context to help answer:{knowledge_context}"
+    
+    messages = [
+        {'role': 'system', 'content': system_prompt},
+        {'role': 'user', 'content': question}
+    ]
+    
+    answer = await ollama_chat(messages)
+    
+    if len(answer) > 2000:
+        answer = answer[:1997] + '...'
+    
+    await interaction.followup.send(answer)
+
+
+@bot.tree.command(name='knowledge_add', description='Add a document to the knowledge base')
+@app_commands.describe(title='Title for the document', content='The content to add')
+async def knowledge_add(interaction: discord.Interaction, title: str, content: str):
+    """Add a document to the knowledge base."""
+    await interaction.response.defer()
+    
+    if not supabase:
+        await interaction.followup.send("❌ Database not configured.")
+        return
+    
+    if not embedding_available:
+        await interaction.followup.send("⚠️ Embeddings not available. Document will be added without semantic search capability.")
+    
+    success = await add_document_to_knowledge_base(title, content)
+    
+    if success:
+        await interaction.followup.send(f"✅ Added document: **{title}**")
+    else:
+        await interaction.followup.send(f"❌ Failed to add document.")
+
+
+@bot.tree.command(name='knowledge_search', description='Search the knowledge base')
+@app_commands.describe(query='What to search for')
+async def knowledge_search(interaction: discord.Interaction, query: str):
+    """Search the knowledge base."""
+    await interaction.response.defer()
+    
+    if not embedding_available:
+        await interaction.followup.send("❌ Embeddings not available. Run `ollama pull nomic-embed-text` to enable RAG.")
+        return
+    
+    results = await search_knowledge_base(query, match_count=5)
+    
+    if not results:
+        await interaction.followup.send("No matching documents found.")
+        return
+    
+    embed = discord.Embed(
+        title=f'📚 Search Results for: "{query}"',
+        color=discord.Color.blue()
+    )
+    
+    for doc in results:
+        title = doc.get('title', 'Untitled')
+        content = doc.get('content', '')[:200] + '...' if len(doc.get('content', '')) > 200 else doc.get('content', '')
+        similarity = doc.get('similarity', 0)
+        embed.add_field(
+            name=f"{title} ({similarity:.0%} match)",
+            value=content,
+            inline=False
+        )
+    
+    await interaction.followup.send(embed=embed)
+
+
+@bot.tree.command(name='knowledge_list', description='List all documents in the knowledge base')
+async def knowledge_list(interaction: discord.Interaction):
+    """List all documents in the knowledge base."""
+    await interaction.response.defer()
+    
+    if not supabase:
+        await interaction.followup.send("❌ Database not configured.")
         return
     
     try:
-        response = await openai_client.chat.completions.create(
-            model=OPENAI_MODEL,
-            messages=[
-                {'role': 'system', 'content': config['system_instructions']},
-                {'role': 'user', 'content': question}
-            ],
-            max_tokens=1000
+        result = supabase.table('knowledge_documents').select('id, title, created_at').order('created_at', desc=True).limit(20).execute()
+        
+        if not result.data:
+            await interaction.followup.send("📚 Knowledge base is empty.")
+            return
+        
+        embed = discord.Embed(
+            title='📚 Knowledge Base Documents',
+            color=discord.Color.blue()
         )
-        answer = response.choices[0].message.content
         
-        if len(answer) > 2000:
-            answer = answer[:1997] + '...'
+        for row in result.data:
+            doc: Dict[str, Any] = dict(row)  # type: ignore
+            doc_title = str(doc.get('title', 'Untitled'))
+            doc_id = str(doc.get('id', ''))[:8]
+            embed.add_field(name=doc_title, value=f"ID: {doc_id}...", inline=False)
         
-        await interaction.followup.send(answer)
+        await interaction.followup.send(embed=embed)
     except Exception as e:
-        await interaction.followup.send(f"Error: {str(e)}")
+        await interaction.followup.send(f"❌ Error: {e}")
+
+
+@bot.tree.command(name='knowledge_delete', description='Delete a document from the knowledge base')
+@app_commands.describe(title='Title of the document to delete')
+async def knowledge_delete(interaction: discord.Interaction, title: str):
+    """Delete a document from the knowledge base."""
+    await interaction.response.defer()
+    
+    if not supabase:
+        await interaction.followup.send("❌ Database not configured.")
+        return
+    
+    try:
+        result = supabase.table('knowledge_documents').delete().ilike('title', f'%{title}%').execute()
+        
+        if result.data:
+            count = len(result.data)
+            await interaction.followup.send(f"✅ Deleted {count} document(s) matching: **{title}**")
+        else:
+            await interaction.followup.send(f"❌ No documents found matching: **{title}**")
+    except Exception as e:
+        await interaction.followup.send(f"❌ Error: {e}")
 
 
 # Error handling
