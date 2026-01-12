@@ -1,93 +1,144 @@
-# Discord Bot Template
+# DasAI - Discord Copilot
 
-A simple Discord bot template using discord.py with both prefix commands and slash commands.
+An admin-controlled AI Discord bot with a web dashboard for managing system instructions, allowed channels, and conversation memory.
 
-## Setup
-
-### 1. Create a Discord Application
-
-1. Go to the [Discord Developer Portal](https://discord.com/developers/applications)
-2. Click "New Application" and give it a name
-3. Go to the "Bot" section and click "Add Bot"
-4. Copy the bot token
-
-### 2. Configure the Bot
-
-1. Copy `.env.example` to `.env`
-2. Paste your bot token in the `.env` file
+## Architecture
 
 ```
-DISCORD_TOKEN=your_bot_token_here
-```
-
-### 3. Install Dependencies
-
-```bash
-pip install -r requirements.txt
-```
-
-### 4. Invite the Bot to Your Server
-
-1. Go to the "OAuth2" > "URL Generator" section in the Developer Portal
-2. Select the following scopes:
-   - `bot`
-   - `applications.commands`
-3. Select the bot permissions you need (Administrator for testing, or specific permissions for production)
-4. Copy the generated URL and open it in your browser
-5. Select your server and authorize the bot
-
-### 5. Run the Bot
-
-```bash
-python bot.py
+DasAI/
+├── bot.py                    # Discord bot (Python)
+├── requirements.txt          # Python dependencies
+├── .env                      # Bot environment variables
+├── admin/                    # Next.js Admin Dashboard
+│   ├── src/
+│   │   ├── app/
+│   │   │   ├── dashboard/    # Main admin interface
+│   │   │   └── login/        # Authentication
+│   │   └── lib/
+│   │       └── supabase/     # Database client
+│   └── package.json
+└── database/
+    └── schema.sql            # Supabase database schema
 ```
 
 ## Features
 
-### Prefix Commands (!)
+### Admin Dashboard
+- **System Instructions**: Configure the bot's personality, tone, and rules
+- **Allowed Channels**: Control which Discord channels the bot responds in
+- **Memory Control**: View and reset conversation summaries
+- **Authentication**: Secure login via Supabase Auth
 
-- `!ping` - Check bot latency
-- `!hello` - Get a greeting from the bot
-- `!help` - Show all available commands
+### Discord Bot
+- **AI Responses**: Powered by OpenAI (GPT-4o-mini by default)
+- **Context Awareness**: Uses conversation memory and recent messages
+- **Channel Filtering**: Only responds in admin-configured channels
+- **Slash Commands**: `/ping`, `/ask`
+- **Prefix Commands**: `!ping`, `!reload`, `!status`
 
-### Slash Commands (/)
+## Setup
 
-- `/ping` - Check bot latency
-- `/say <message>` - Make the bot say something
-- `/userinfo [member]` - Get information about a user
+### 1. Supabase Setup
 
-## Project Structure
+1. Create a new project at [supabase.com](https://supabase.com)
+2. Go to SQL Editor and run the contents of `database/schema.sql`
+3. Go to Authentication → Users and create an admin user
+4. Copy your project URL and keys from Settings → API
 
+### 2. Discord Bot Setup
+
+1. Create a bot at [Discord Developer Portal](https://discord.com/developers/applications)
+2. Enable these Privileged Gateway Intents:
+   - Server Members Intent
+   - Message Content Intent
+3. Generate an invite URL with `bot` + `applications.commands` scopes
+4. Configure environment:
+
+```bash
+# Copy example and fill in values
+cp .env.example .env
 ```
-DasAI/
-├── bot.py              # Main bot file
-├── requirements.txt    # Python dependencies
-├── .env.example        # Example environment variables
-├── .env                # Your actual environment variables (create this)
-└── README.md           # This file
+
+```env
+DISCORD_TOKEN=your_discord_bot_token
+SUPABASE_URL=https://your-project.supabase.co
+SUPABASE_SERVICE_KEY=your_service_role_key
+OPENAI_API_KEY=your_openai_api_key
+OPENAI_MODEL=gpt-4o-mini
 ```
 
-## Adding More Commands
+5. Install and run:
 
-### Prefix Command Example
-
-```python
-@bot.command(name='greet')
-async def greet(ctx, name: str):
-    await ctx.send(f'Hello, {name}!')
+```bash
+pip install -r requirements.txt
+python bot.py
 ```
 
-### Slash Command Example
+### 3. Admin Dashboard Setup
 
-```python
-@bot.tree.command(name='greet', description='Greet someone')
-@app_commands.describe(name='The name to greet')
-async def greet(interaction: discord.Interaction, name: str):
-    await interaction.response.send_message(f'Hello, {name}!')
+```bash
+cd admin
+
+# Install dependencies
+npm install
+
+# Configure environment
+cp .env.local.example .env.local
 ```
+
+```env
+NEXT_PUBLIC_SUPABASE_URL=https://your-project.supabase.co
+NEXT_PUBLIC_SUPABASE_ANON_KEY=your_anon_key
+```
+
+```bash
+# Run development server
+npm run dev
+
+# Or build for production
+npm run build
+npm start
+```
+
+### 4. Deploy to Vercel
+
+```bash
+cd admin
+npx vercel
+```
+
+## Bot Commands
+
+| Command | Description |
+|---------|-------------|
+| `/ping` | Check bot latency |
+| `/ask <question>` | Ask the AI a question |
+| `!ping` | Check bot latency |
+| `!status` | View bot configuration status |
+| `!reload` | Reload config from database (admin only) |
+
+## How It Works
+
+1. **Admin configures** the bot via the web dashboard
+2. **Configuration is stored** in Supabase
+3. **Bot fetches config** and responds accordingly
+4. **Conversations are summarized** and stored for context
+5. **AI generates responses** using system instructions + memory
+
+## Optional: RAG System
+
+To implement knowledge base retrieval:
+
+1. Enable the `vector` extension in Supabase
+2. Upload PDFs via the admin dashboard
+3. Use embeddings to find relevant content
+4. Include in AI prompts
+
+The schema already includes a `knowledge_documents` table with vector support.
 
 ## Resources
 
 - [discord.py Documentation](https://discordpy.readthedocs.io/)
-- [Discord Developer Portal](https://discord.com/developers/applications)
-- [Discord API Documentation](https://discord.com/developers/docs/intro)
+- [Supabase Documentation](https://supabase.com/docs)
+- [Next.js Documentation](https://nextjs.org/docs)
+- [OpenAI API](https://platform.openai.com/docs)
