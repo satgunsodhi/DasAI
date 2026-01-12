@@ -4,6 +4,10 @@
 -- Enable UUID extension
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 
+-- Enable pgvector extension for RAG embeddings
+-- NOTE: In Supabase, go to Database > Extensions and enable "vector" first
+CREATE EXTENSION IF NOT EXISTS "vector";
+
 -- Bot Configuration Table
 CREATE TABLE IF NOT EXISTS bot_config (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
@@ -35,14 +39,51 @@ CREATE TABLE IF NOT EXISTS messages (
     created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
--- Knowledge Documents Table (Optional RAG)
+-- Knowledge Documents Table (RAG)
+-- Uses nomic-embed-text model from Ollama (768 dimensions)
 CREATE TABLE IF NOT EXISTS knowledge_documents (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    filename TEXT NOT NULL,
+    title TEXT NOT NULL,
+    filename TEXT,
     content TEXT NOT NULL,
-    embedding vector(1536), -- For OpenAI embeddings
+    chunk_index INTEGER DEFAULT 0,
+    embedding vector(768),  -- nomic-embed-text produces 768-dim embeddings
+    metadata JSONB DEFAULT '{}',
     created_at TIMESTAMPTZ DEFAULT NOW()
 );
+
+-- Index for vector similarity search (using cosine distance)
+CREATE INDEX IF NOT EXISTS idx_knowledge_embedding ON knowledge_documents 
+USING ivfflat (embedding vector_cosine_ops) WITH (lists = 100);
+
+-- Function for similarity search
+CREATE OR REPLACE FUNCTION search_documents(
+    query_embedding vector(768),
+    match_threshold FLOAT DEFAULT 0.7,
+    match_count INT DEFAULT 5
+)
+RETURNS TABLE (
+    id UUID,
+    title TEXT,
+    content TEXT,
+    similarity FLOAT
+)
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    RETURN QUERY
+    SELECT
+        kd.id,
+        kd.title,
+        kd.content,
+        1 - (kd.embedding <=> query_embedding) AS similarity
+    FROM knowledge_documents kd
+    WHERE kd.embedding IS NOT NULL
+        AND 1 - (kd.embedding <=> query_embedding) > match_threshold
+    ORDER BY kd.embedding <=> query_embedding
+    LIMIT match_count;
+END;
+$$;
 
 -- Indexes for performance
 CREATE INDEX IF NOT EXISTS idx_messages_channel_id ON messages(channel_id);
@@ -88,6 +129,7 @@ CREATE POLICY "Allow service role full access to knowledge_documents" ON knowled
     FOR ALL TO service_role USING (true);
 
 -- Insert default configuration
+-- Empty allowed_channels array means ALL channels are allowed
 INSERT INTO bot_config (bot_name, system_instructions, allowed_channels)
 VALUES (
     'DasAI Assistant',
@@ -98,7 +140,7 @@ Key behaviors:
 - Be conversational but professional
 - If you don''t know something, say so
 - Keep responses concise unless detail is requested',
-    '{}'
+    '{}'  -- Empty array = all channels allowed
 ) ON CONFLICT DO NOTHING;
 
 -- Function to update timestamp
