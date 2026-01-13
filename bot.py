@@ -2,11 +2,15 @@ import discord
 from discord.ext import commands
 from discord import app_commands
 import os
+import sys
 import asyncio
-import httpx
 from dotenv import load_dotenv
 from typing import Optional, Any, Dict, List
 from supabase import create_client, Client
+from huggingface_hub import InferenceClient
+
+# Force unbuffered output for Railway/Docker logs
+sys.stdout.reconfigure(line_buffering=True)
 
 # Load environment variables
 load_dotenv()
@@ -16,12 +20,12 @@ SUPABASE_KEY = os.getenv('SUPABASE_SERVICE_ROLE_KEY')
 
 # Hugging Face Configuration
 HF_API_KEY = os.getenv('HF_API_KEY')
-HF_MODEL = os.getenv('HF_MODEL', 'mistralai/Mistral-7B-Instruct-v0.3')
+HF_MODEL = os.getenv('HF_MODEL', 'meta-llama/Llama-3.2-3B-Instruct')
 HF_EMBED_MODEL = os.getenv('HF_EMBED_MODEL', 'sentence-transformers/all-MiniLM-L6-v2')
-HF_API_URL = 'https://api-inference.huggingface.co/models'
 
 # Initialize clients
 supabase: Optional[Client] = create_client(SUPABASE_URL, SUPABASE_KEY) if SUPABASE_URL and SUPABASE_KEY else None
+hf_client: Optional[InferenceClient] = InferenceClient(token=HF_API_KEY) if HF_API_KEY else None
 hf_available = False
 embedding_available = False
 
@@ -30,127 +34,110 @@ async def check_hf_api():
     """Check if Hugging Face API is available."""
     global hf_available, embedding_available
     
-    if not HF_API_KEY:
+    if not HF_API_KEY or not hf_client:
         print('HF_API_KEY not set. AI features disabled.')
         return
     
     try:
-        async with httpx.AsyncClient() as client:
-            # Test chat model
-            response = await client.post(
-                f'{HF_API_URL}/{HF_MODEL}',
-                headers={'Authorization': f'Bearer {HF_API_KEY}'},
-                json={'inputs': 'Hello', 'parameters': {'max_new_tokens': 5}},
-                timeout=30.0
+        # Test chat model using official SDK
+        loop = asyncio.get_event_loop()
+        response = await loop.run_in_executor(
+            None,
+            lambda: hf_client.chat_completion(
+                messages=[{'role': 'user', 'content': 'Hi'}],
+                model=HF_MODEL,
+                max_tokens=5
             )
-            if response.status_code == 200 or response.status_code == 503:  # 503 = model loading
-                hf_available = True
-                print(f'Hugging Face API connected - Model: {HF_MODEL}')
-            else:
-                print(f'Hugging Face API error: {response.status_code} - {response.text}')
+        )
+        if response and response.choices:
+            hf_available = True
+            print(f'Hugging Face API connected - Model: {HF_MODEL}')
+        else:
+            print(f'Hugging Face API error: No response from model')
             
-            # Test embedding model
-            embed_response = await client.post(
-                f'{HF_API_URL}/{HF_EMBED_MODEL}',
-                headers={'Authorization': f'Bearer {HF_API_KEY}'},
-                json={'inputs': 'test'},
-                timeout=30.0
+    except Exception as e:
+        print(f'Hugging Face chat API error: {e}')
+    
+    try:
+        # Test embedding model
+        loop = asyncio.get_event_loop()
+        embed_response = await loop.run_in_executor(
+            None,
+            lambda: hf_client.feature_extraction(
+                text='test',
+                model=HF_EMBED_MODEL
             )
-            if embed_response.status_code == 200 or embed_response.status_code == 503:
-                embedding_available = True
-                print(f'Embedding model available: {HF_EMBED_MODEL}')
-            else:
-                print(f'Embedding model not available. RAG disabled.')
+        )
+        if embed_response is not None:
+            embedding_available = True
+            print(f'Embedding model available: {HF_EMBED_MODEL}')
+        else:
+            print(f'Embedding model not available. RAG disabled.')
                 
     except Exception as e:
-        print(f'Hugging Face API error: {e}')
+        print(f'Embedding API error: {e}')
+        print('RAG features disabled.')
 
 
 async def hf_chat(messages: list, model: Optional[str] = None) -> str:
-    """Send chat request to Hugging Face Inference API."""
-    if not hf_available or not HF_API_KEY:
+    """Send chat request to Hugging Face Inference API using official SDK."""
+    if not hf_available or not hf_client:
         return "AI is not configured. Please set HF_API_KEY."
     
     model = model or HF_MODEL
     
-    # Convert messages to a prompt format
-    prompt = ""
-    for msg in messages:
-        role = msg.get('role', 'user')
-        content = msg.get('content', '')
-        if role == 'system':
-            prompt += f"<s>[INST] <<SYS>>\n{content}\n<</SYS>>\n\n"
-        elif role == 'user':
-            prompt += f"{content} [/INST] "
-        elif role == 'assistant':
-            prompt += f"{content} </s><s>[INST] "
-    
     try:
-        async with httpx.AsyncClient(timeout=120.0) as client:
-            response = await client.post(
-                f'{HF_API_URL}/{model}',
-                headers={'Authorization': f'Bearer {HF_API_KEY}'},
-                json={
-                    'inputs': prompt,
-                    'parameters': {
-                        'max_new_tokens': 1000,
-                        'temperature': 0.7,
-                        'do_sample': True,
-                        'return_full_text': False
-                    }
-                }
+        # Run synchronous HF client in executor to not block event loop
+        loop = asyncio.get_event_loop()
+        response = await loop.run_in_executor(
+            None,
+            lambda: hf_client.chat_completion(
+                messages=messages,
+                model=model,
+                max_tokens=1000,
+                temperature=0.7
             )
+        )
+        
+        if response and response.choices and len(response.choices) > 0:
+            return response.choices[0].message.content or 'No response generated.'
+        return 'No response generated.'
             
-            if response.status_code == 503:
-                data = response.json()
-                wait_time = data.get('estimated_time', 20)
-                return f"Model is loading, please try again in ~{int(wait_time)} seconds."
-            
-            response.raise_for_status()
-            data = response.json()
-            
-            if isinstance(data, list) and len(data) > 0:
-                return data[0].get('generated_text', 'No response generated.')
-            return str(data)
-            
-    except httpx.TimeoutException:
-        return "Request timed out. Please try again."
     except Exception as e:
         print(f'Hugging Face error: {e}')
         return f"Error: {str(e)}"
 
 
 async def hf_embed(text: str) -> Optional[List[float]]:
-    """Generate embeddings using Hugging Face."""
-    if not embedding_available or not HF_API_KEY:
+    """Generate embeddings using Hugging Face official SDK."""
+    if not embedding_available or not hf_client:
         return None
     
     try:
-        async with httpx.AsyncClient(timeout=60.0) as client:
-            response = await client.post(
-                f'{HF_API_URL}/{HF_EMBED_MODEL}',
-                headers={'Authorization': f'Bearer {HF_API_KEY}'},
-                json={'inputs': text}
+        loop = asyncio.get_event_loop()
+        data = await loop.run_in_executor(
+            None,
+            lambda: hf_client.feature_extraction(
+                text=text,
+                model=HF_EMBED_MODEL
             )
-            
-            if response.status_code == 503:
-                # Model loading, wait and retry
-                await asyncio.sleep(5)
-                response = await client.post(
-                    f'{HF_API_URL}/{HF_EMBED_MODEL}',
-                    headers={'Authorization': f'Bearer {HF_API_KEY}'},
-                    json={'inputs': text}
-                )
-            
-            response.raise_for_status()
-            data = response.json()
-            
-            # HF returns nested array for sentence-transformers
-            if isinstance(data, list) and len(data) > 0:
-                if isinstance(data[0], list):
-                    return data[0]
+        )
+        
+        # Handle numpy array return format
+        if data is not None:
+            # Convert numpy array to list
+            if hasattr(data, 'tolist'):
+                result = data.tolist()
+                # If it's already a flat list, return it
+                if isinstance(result, list) and len(result) > 0:
+                    if not isinstance(result[0], list):
+                        return result
+                    # If nested, take first element
+                    return result[0]
+            # If it's already a list
+            if isinstance(data, list):
                 return data
-            return None
+        return None
     except Exception as e:
         print(f'Embedding error: {e}')
         return None

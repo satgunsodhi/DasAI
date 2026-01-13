@@ -40,14 +40,14 @@ CREATE TABLE IF NOT EXISTS messages (
 );
 
 -- Knowledge Documents Table (RAG)
--- Uses nomic-ai/nomic-embed-text-v1 from Hugging Face (768 dimensions)
+-- Uses sentence-transformers/all-MiniLM-L6-v2 from Hugging Face (384 dimensions)
 CREATE TABLE IF NOT EXISTS knowledge_documents (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     title TEXT NOT NULL,
     filename TEXT,
     content TEXT NOT NULL,
     chunk_index INTEGER DEFAULT 0,
-    embedding vector(768),  -- nomic-embed-text produces 768-dim embeddings
+    embedding vector(384),  -- all-MiniLM-L6-v2 produces 384-dim embeddings
     metadata JSONB DEFAULT '{}',
     created_at TIMESTAMPTZ DEFAULT NOW()
 );
@@ -58,7 +58,7 @@ USING ivfflat (embedding vector_cosine_ops) WITH (lists = 100);
 
 -- Function for similarity search
 CREATE OR REPLACE FUNCTION search_documents(
-    query_embedding vector(768),
+    query_embedding vector(384),
     match_threshold FLOAT DEFAULT 0.7,
     match_count INT DEFAULT 5
 )
