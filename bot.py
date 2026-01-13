@@ -9,9 +9,6 @@ from typing import Optional, Any, Dict, List
 from supabase import create_client, Client
 from huggingface_hub import InferenceClient
 
-# Force unbuffered output for Railway/Docker logs
-sys.stdout.reconfigure(line_buffering=True)
-
 # Load environment variables
 load_dotenv()
 TOKEN = os.getenv('DISCORD_TOKEN')
@@ -29,6 +26,24 @@ hf_client: Optional[InferenceClient] = InferenceClient(token=HF_API_KEY) if HF_A
 hf_available = False
 embedding_available = False
 
+def _sync_chat_test():
+    """Synchronous wrapper for chat test."""
+    assert hf_client is not None
+    return hf_client.chat_completion(
+        messages=[{'role': 'user', 'content': 'Hi'}],
+        model=HF_MODEL,
+        max_tokens=5
+    )
+
+
+def _sync_embed_test():
+    """Synchronous wrapper for embed test."""
+    assert hf_client is not None
+    return hf_client.feature_extraction(
+        text='test',
+        model=HF_EMBED_MODEL
+    )
+
 
 async def check_hf_api():
     """Check if Hugging Face API is available."""
@@ -41,14 +56,7 @@ async def check_hf_api():
     try:
         # Test chat model using official SDK
         loop = asyncio.get_event_loop()
-        response = await loop.run_in_executor(
-            None,
-            lambda: hf_client.chat_completion(
-                messages=[{'role': 'user', 'content': 'Hi'}],
-                model=HF_MODEL,
-                max_tokens=5
-            )
-        )
+        response = await loop.run_in_executor(None, _sync_chat_test)
         if response and response.choices:
             hf_available = True
             print(f'Hugging Face API connected - Model: {HF_MODEL}')
@@ -61,13 +69,7 @@ async def check_hf_api():
     try:
         # Test embedding model
         loop = asyncio.get_event_loop()
-        embed_response = await loop.run_in_executor(
-            None,
-            lambda: hf_client.feature_extraction(
-                text='test',
-                model=HF_EMBED_MODEL
-            )
-        )
+        embed_response = await loop.run_in_executor(None, _sync_embed_test)
         if embed_response is not None:
             embedding_available = True
             print(f'Embedding model available: {HF_EMBED_MODEL}')
@@ -77,6 +79,26 @@ async def check_hf_api():
     except Exception as e:
         print(f'Embedding API error: {e}')
         print('RAG features disabled.')
+
+
+def _sync_chat(messages: list, model: str) -> Any:
+    """Synchronous wrapper for chat completion."""
+    assert hf_client is not None
+    return hf_client.chat_completion(
+        messages=messages,
+        model=model,
+        max_tokens=1000,
+        temperature=0.7
+    )
+
+
+def _sync_embed(text: str) -> Any:
+    """Synchronous wrapper for embedding."""
+    assert hf_client is not None
+    return hf_client.feature_extraction(
+        text=text,
+        model=HF_EMBED_MODEL
+    )
 
 
 async def hf_chat(messages: list, model: Optional[str] = None) -> str:
@@ -91,12 +113,7 @@ async def hf_chat(messages: list, model: Optional[str] = None) -> str:
         loop = asyncio.get_event_loop()
         response = await loop.run_in_executor(
             None,
-            lambda: hf_client.chat_completion(
-                messages=messages,
-                model=model,
-                max_tokens=1000,
-                temperature=0.7
-            )
+            lambda: _sync_chat(messages, model)
         )
         
         if response and response.choices and len(response.choices) > 0:
@@ -117,10 +134,7 @@ async def hf_embed(text: str) -> Optional[List[float]]:
         loop = asyncio.get_event_loop()
         data = await loop.run_in_executor(
             None,
-            lambda: hf_client.feature_extraction(
-                text=text,
-                model=HF_EMBED_MODEL
-            )
+            lambda: _sync_embed(text)
         )
         
         # Handle numpy array return format
