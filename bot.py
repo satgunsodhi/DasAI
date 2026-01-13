@@ -13,85 +13,144 @@ load_dotenv()
 TOKEN = os.getenv('DISCORD_TOKEN')
 SUPABASE_URL = os.getenv('SUPABASE_URL')
 SUPABASE_KEY = os.getenv('SUPABASE_SERVICE_ROLE_KEY')
-OLLAMA_HOST = os.getenv('OLLAMA_HOST', 'http://localhost:11434')
-OLLAMA_MODEL = os.getenv('OLLAMA_MODEL', 'llama3.2')
-OLLAMA_EMBED_MODEL = os.getenv('OLLAMA_EMBED_MODEL', 'nomic-embed-text')
+
+# Hugging Face Configuration
+HF_API_KEY = os.getenv('HF_API_KEY')
+HF_MODEL = os.getenv('HF_MODEL', 'mistralai/Mistral-7B-Instruct-v0.3')
+HF_EMBED_MODEL = os.getenv('HF_EMBED_MODEL', 'sentence-transformers/all-MiniLM-L6-v2')
+HF_API_URL = 'https://api-inference.huggingface.co/models'
 
 # Initialize clients
 supabase: Optional[Client] = create_client(SUPABASE_URL, SUPABASE_KEY) if SUPABASE_URL and SUPABASE_KEY else None
-ollama_available = False
+hf_available = False
 embedding_available = False
 
 
-async def check_ollama():
-    """Check if Ollama is available and which models are loaded."""
-    global ollama_available, embedding_available
+async def check_hf_api():
+    """Check if Hugging Face API is available."""
+    global hf_available, embedding_available
+    
+    if not HF_API_KEY:
+        print('HF_API_KEY not set. AI features disabled.')
+        return
+    
     try:
         async with httpx.AsyncClient() as client:
-            response = await client.get(f'{OLLAMA_HOST}/api/tags', timeout=5.0)
-            ollama_available = response.status_code == 200
-            if ollama_available:
-                print(f'Ollama connected at {OLLAMA_HOST}')
-                # Check if embedding model is available
-                data = response.json()
-                models = [m.get('name', '').split(':')[0] for m in data.get('models', [])]
-                if OLLAMA_EMBED_MODEL in models or f'{OLLAMA_EMBED_MODEL}:latest' in [m.get('name', '') for m in data.get('models', [])]:
-                    embedding_available = True
-                    print(f'Embedding model {OLLAMA_EMBED_MODEL} is available')
-                else:
-                    print(f'Embedding model {OLLAMA_EMBED_MODEL} not found. RAG will be disabled.')
-                    print(f'Available models: {models}')
-                    print(f'To enable RAG, run: ollama pull {OLLAMA_EMBED_MODEL}')
+            # Test chat model
+            response = await client.post(
+                f'{HF_API_URL}/{HF_MODEL}',
+                headers={'Authorization': f'Bearer {HF_API_KEY}'},
+                json={'inputs': 'Hello', 'parameters': {'max_new_tokens': 5}},
+                timeout=30.0
+            )
+            if response.status_code == 200 or response.status_code == 503:  # 503 = model loading
+                hf_available = True
+                print(f'Hugging Face API connected - Model: {HF_MODEL}')
+            else:
+                print(f'Hugging Face API error: {response.status_code} - {response.text}')
+            
+            # Test embedding model
+            embed_response = await client.post(
+                f'{HF_API_URL}/{HF_EMBED_MODEL}',
+                headers={'Authorization': f'Bearer {HF_API_KEY}'},
+                json={'inputs': 'test'},
+                timeout=30.0
+            )
+            if embed_response.status_code == 200 or embed_response.status_code == 503:
+                embedding_available = True
+                print(f'Embedding model available: {HF_EMBED_MODEL}')
+            else:
+                print(f'Embedding model not available. RAG disabled.')
+                
     except Exception as e:
-        print(f'Ollama not available: {e}')
-        ollama_available = False
+        print(f'Hugging Face API error: {e}')
 
 
-async def ollama_chat(messages: list, model: Optional[str] = None) -> str:
-    """Send chat request to Ollama."""
-    model = model or OLLAMA_MODEL or 'llama3.2'
+async def hf_chat(messages: list, model: Optional[str] = None) -> str:
+    """Send chat request to Hugging Face Inference API."""
+    if not hf_available or not HF_API_KEY:
+        return "AI is not configured. Please set HF_API_KEY."
+    
+    model = model or HF_MODEL
+    
+    # Convert messages to a prompt format
+    prompt = ""
+    for msg in messages:
+        role = msg.get('role', 'user')
+        content = msg.get('content', '')
+        if role == 'system':
+            prompt += f"<s>[INST] <<SYS>>\n{content}\n<</SYS>>\n\n"
+        elif role == 'user':
+            prompt += f"{content} [/INST] "
+        elif role == 'assistant':
+            prompt += f"{content} </s><s>[INST] "
     
     try:
         async with httpx.AsyncClient(timeout=120.0) as client:
             response = await client.post(
-                f'{OLLAMA_HOST}/api/chat',
+                f'{HF_API_URL}/{model}',
+                headers={'Authorization': f'Bearer {HF_API_KEY}'},
                 json={
-                    'model': model,
-                    'messages': messages,
-                    'stream': False,
-                    'options': {
+                    'inputs': prompt,
+                    'parameters': {
+                        'max_new_tokens': 1000,
                         'temperature': 0.7,
-                        'num_predict': 1000,
+                        'do_sample': True,
+                        'return_full_text': False
                     }
                 }
             )
+            
+            if response.status_code == 503:
+                data = response.json()
+                wait_time = data.get('estimated_time', 20)
+                return f"Model is loading, please try again in ~{int(wait_time)} seconds."
+            
             response.raise_for_status()
             data = response.json()
-            return data.get('message', {}).get('content', 'No response generated.')
+            
+            if isinstance(data, list) and len(data) > 0:
+                return data[0].get('generated_text', 'No response generated.')
+            return str(data)
+            
     except httpx.TimeoutException:
-        return "Request timed out. The model might be loading or the response is taking too long."
+        return "Request timed out. Please try again."
     except Exception as e:
-        print(f'Ollama error: {e}')
-        return f"Error communicating with Ollama: {str(e)}"
+        print(f'Hugging Face error: {e}')
+        return f"Error: {str(e)}"
 
 
-async def ollama_embed(text: str) -> Optional[List[float]]:
-    """Generate embeddings using Ollama."""
-    if not embedding_available:
+async def hf_embed(text: str) -> Optional[List[float]]:
+    """Generate embeddings using Hugging Face."""
+    if not embedding_available or not HF_API_KEY:
         return None
     
     try:
         async with httpx.AsyncClient(timeout=60.0) as client:
             response = await client.post(
-                f'{OLLAMA_HOST}/api/embeddings',
-                json={
-                    'model': OLLAMA_EMBED_MODEL,
-                    'prompt': text
-                }
+                f'{HF_API_URL}/{HF_EMBED_MODEL}',
+                headers={'Authorization': f'Bearer {HF_API_KEY}'},
+                json={'inputs': text}
             )
+            
+            if response.status_code == 503:
+                # Model loading, wait and retry
+                await asyncio.sleep(5)
+                response = await client.post(
+                    f'{HF_API_URL}/{HF_EMBED_MODEL}',
+                    headers={'Authorization': f'Bearer {HF_API_KEY}'},
+                    json={'inputs': text}
+                )
+            
             response.raise_for_status()
             data = response.json()
-            return data.get('embedding')
+            
+            # HF returns nested array for sentence-transformers
+            if isinstance(data, list) and len(data) > 0:
+                if isinstance(data[0], list):
+                    return data[0]
+                return data
+            return None
     except Exception as e:
         print(f'Embedding error: {e}')
         return None
@@ -103,7 +162,7 @@ async def search_knowledge_base(query: str, match_count: int = 3) -> List[Dict[s
         return []
     
     # Generate embedding for the query
-    query_embedding = await ollama_embed(query)
+    query_embedding = await hf_embed(query)
     if not query_embedding:
         return []
     
@@ -153,7 +212,7 @@ async def add_document_to_knowledge_base(title: str, content: str, filename: Opt
     try:
         for i, chunk in enumerate(chunks):
             # Generate embedding for the chunk
-            embedding = await ollama_embed(chunk) if embedding_available else None
+            embedding = await hf_embed(chunk) if embedding_available else None
             
             doc_data: Dict[str, Any] = {
                 'title': f"{title}" if len(chunks) == 1 else f"{title} (Part {i+1})",
@@ -225,7 +284,7 @@ async def get_conversation_memory(channel_id: str) -> str:
 
 async def update_conversation_memory(channel_id: str, new_message: str, bot_response: str):
     """Update conversation memory with new exchange."""
-    if not supabase or not ollama_available:
+    if not supabase or not hf_available:
         return
     
     try:
@@ -250,7 +309,7 @@ Assistant: {bot_response}
 
 Create a brief updated summary of the conversation so far (max 200 words):"""
             
-            current_summary = await ollama_chat([{'role': 'user', 'content': summary_prompt}])
+            current_summary = await hf_chat([{'role': 'user', 'content': summary_prompt}])
         
         # Upsert memory
         supabase.table('conversation_memory').upsert({
@@ -281,9 +340,9 @@ async def save_message(channel_id: str, user_id: str, username: str, content: st
 
 
 async def generate_ai_response(message: discord.Message, config: dict) -> str:
-    """Generate AI response using Ollama with RAG context."""
-    if not ollama_available:
-        return "AI is not configured. Please make sure Ollama is running."
+    """Generate AI response using Hugging Face with RAG context."""
+    if not hf_available:
+        return "AI is not configured. Please set HF_API_KEY."
     
     channel_id = str(message.channel.id)
     user_query = message.content
@@ -333,7 +392,7 @@ async def generate_ai_response(message: discord.Message, config: dict) -> str:
     messages.extend(recent_messages[-6:])  # Last 6 messages for context
     messages.append({'role': 'user', 'content': f"{message.author.display_name}: {user_query}"})
     
-    return await ollama_chat(messages)
+    return await hf_chat(messages)
 
 
 @bot.event
@@ -342,8 +401,8 @@ async def on_ready():
     print(f'{bot.user} has connected to Discord!')
     print(f'Bot is in {len(bot.guilds)} guild(s)')
     
-    # Check Ollama connection
-    await check_ollama()
+    # Check Hugging Face API connection
+    await check_hf_api()
     
     # Fetch initial config
     await fetch_bot_config()
@@ -441,15 +500,14 @@ async def status(ctx):
     config = bot_config_cache
     embed = discord.Embed(
         title='🤖 DasAI Status',
-        color=discord.Color.green() if ollama_available else discord.Color.red()
+        color=discord.Color.green() if hf_available else discord.Color.red()
     )
     embed.add_field(name='Bot Name', value=config['bot_name'], inline=True)
     embed.add_field(name='Allowed Channels', value=len(config['allowed_channels']) or 'All', inline=True)
-    embed.add_field(name='AI Model', value=OLLAMA_MODEL, inline=True)
-    embed.add_field(name='Embed Model', value=OLLAMA_EMBED_MODEL if embedding_available else 'Not available', inline=True)
-    embed.add_field(name='Ollama Host', value=OLLAMA_HOST, inline=True)
+    embed.add_field(name='AI Model', value=HF_MODEL, inline=True)
+    embed.add_field(name='Embed Model', value=HF_EMBED_MODEL if embedding_available else 'Not available', inline=True)
     embed.add_field(name='Database', value='✅ Connected' if supabase else '❌ Not configured', inline=True)
-    embed.add_field(name='Ollama', value='✅ Connected' if ollama_available else '❌ Not available', inline=True)
+    embed.add_field(name='Hugging Face', value='✅ Connected' if hf_available else '❌ Not available', inline=True)
     embed.add_field(name='RAG/Embeddings', value='✅ Enabled' if embedding_available else '❌ Disabled', inline=True)
     await ctx.send(embed=embed)
 
@@ -470,8 +528,8 @@ async def ask(interaction: discord.Interaction, question: str):
     
     config = await fetch_bot_config()
     
-    if not ollama_available:
-        await interaction.followup.send("AI is not configured. Make sure Ollama is running.")
+    if not hf_available:
+        await interaction.followup.send("AI is not configured. Set HF_API_KEY in environment.")
         return
     
     # Search knowledge base for relevant context
@@ -494,7 +552,7 @@ async def ask(interaction: discord.Interaction, question: str):
         {'role': 'user', 'content': question}
     ]
     
-    answer = await ollama_chat(messages)
+    answer = await hf_chat(messages)
     
     if len(answer) > 2000:
         answer = answer[:1997] + '...'

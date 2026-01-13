@@ -40,7 +40,7 @@ CREATE TABLE IF NOT EXISTS messages (
 );
 
 -- Knowledge Documents Table (RAG)
--- Uses nomic-embed-text model from Ollama (768 dimensions)
+-- Uses nomic-ai/nomic-embed-text-v1 from Hugging Face (768 dimensions)
 CREATE TABLE IF NOT EXISTS knowledge_documents (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     title TEXT NOT NULL,
