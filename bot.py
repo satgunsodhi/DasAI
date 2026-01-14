@@ -157,8 +157,8 @@ async def hf_embed(text: str) -> Optional[List[float]]:
         return None
 
 
-async def search_knowledge_base(query: str, match_count: int = 3) -> List[Dict[str, Any]]:
-    """Search knowledge base for relevant documents using semantic search."""
+async def search_knowledge_base(guild_id: str, query: str, match_count: int = 3) -> List[Dict[str, Any]]:
+    """Search knowledge base for relevant documents using semantic search (per-guild)."""
     if not supabase or not embedding_available:
         return []
     
@@ -168,8 +168,9 @@ async def search_knowledge_base(query: str, match_count: int = 3) -> List[Dict[s
         return []
     
     try:
-        # Call the similarity search function
+        # Call the similarity search function with guild_id
         result = supabase.rpc('search_documents', {
+            'p_guild_id': guild_id,
             'query_embedding': query_embedding,
             'match_threshold': 0.5,
             'match_count': match_count
@@ -183,8 +184,8 @@ async def search_knowledge_base(query: str, match_count: int = 3) -> List[Dict[s
     return []
 
 
-async def add_document_to_knowledge_base(title: str, content: str, filename: Optional[str] = None) -> bool:
-    """Add a document to the knowledge base with embedding."""
+async def add_document_to_knowledge_base(guild_id: str, title: str, content: str, filename: Optional[str] = None) -> bool:
+    """Add a document to the knowledge base with embedding (per-guild)."""
     if not supabase:
         return False
     
@@ -216,6 +217,7 @@ async def add_document_to_knowledge_base(title: str, content: str, filename: Opt
             embedding = await hf_embed(chunk) if embedding_available else None
             
             doc_data: Dict[str, Any] = {
+                'guild_id': guild_id,
                 'title': f"{title}" if len(chunks) == 1 else f"{title} (Part {i+1})",
                 'filename': filename,
                 'content': chunk,
@@ -240,17 +242,20 @@ intents.members = True
 
 bot = commands.Bot(command_prefix='!', intents=intents)
 
-# Cache for bot configuration
-bot_config_cache = {
-    'system_instructions': 'You are a helpful AI assistant.',
-    'allowed_channels': [],
-    'bot_name': 'DasAI Assistant',
-    'setup_complete': False,
-    'last_fetch': 0
-}
+# Cache for bot configuration per guild
+guild_config_cache: Dict[str, Dict[str, Any]] = {}  # guild_id -> config
 
 # Role cache per guild
 role_cache: Dict[str, Dict[str, str]] = {}  # guild_id -> {user_id -> role}
+
+
+def get_default_config() -> Dict[str, Any]:
+    """Return default configuration for a new guild."""
+    return {
+        'system_instructions': 'You are a helpful AI assistant for a Discord server. Be friendly, concise, and helpful.',
+        'allowed_channels': [],
+        'bot_name': 'DasAI Assistant'
+    }
 
 
 async def get_user_role(guild_id: str, user_id: str) -> Optional[str]:
@@ -265,7 +270,8 @@ async def get_user_role(guild_id: str, user_id: str) -> Optional[str]:
     try:
         result = supabase.table('user_roles').select('role').eq('guild_id', guild_id).eq('user_id', user_id).limit(1).execute()
         if result.data:
-            role = str(result.data[0].get('role', 'member'))
+            row: Dict[str, Any] = dict(result.data[0])  # type: ignore
+            role = str(row.get('role', 'member'))
             if guild_id not in role_cache:
                 role_cache[guild_id] = {}
             role_cache[guild_id][user_id] = role
@@ -342,37 +348,58 @@ async def get_guild_roles(guild_id: str) -> List[Dict[str, Any]]:
     
     try:
         result = supabase.table('user_roles').select('*').eq('guild_id', guild_id).order('created_at').execute()
-        return [dict(row) for row in result.data] if result.data else []
+        if result.data:
+            return [dict(row) for row in result.data]  # type: ignore
+        return []
     except Exception as e:
         print(f'Error fetching guild roles: {e}')
         return []
 
 
-async def fetch_bot_config():
-    """Fetch bot configuration from Supabase."""
+async def fetch_bot_config(guild_id: str, guild_name: Optional[str] = None) -> Dict[str, Any]:
+    """Fetch bot configuration for a specific guild from Supabase."""
     if not supabase:
-        return bot_config_cache
+        return get_default_config()
+    
+    # Check cache first
+    if guild_id in guild_config_cache:
+        return guild_config_cache[guild_id]
     
     try:
-        result = supabase.table('bot_config').select('*').limit(1).execute()
+        result = supabase.table('bot_config').select('*').eq('guild_id', guild_id).limit(1).execute()
         if result.data:
             config: Dict[str, Any] = dict(result.data[0])  # type: ignore
-            bot_config_cache['system_instructions'] = str(config.get('system_instructions', ''))
-            bot_config_cache['allowed_channels'] = list(config.get('allowed_channels', []))
-            bot_config_cache['bot_name'] = str(config.get('bot_name', 'DasAI Assistant'))
+            guild_config_cache[guild_id] = {
+                'system_instructions': str(config.get('system_instructions', '')),
+                'allowed_channels': list(config.get('allowed_channels', [])),
+                'bot_name': str(config.get('bot_name', 'DasAI Assistant'))
+            }
+            return guild_config_cache[guild_id]
+        else:
+            # Create default config for this guild
+            default_config = get_default_config()
+            supabase.table('bot_config').insert({
+                'guild_id': guild_id,
+                'guild_name': guild_name,
+                'bot_name': default_config['bot_name'],
+                'system_instructions': default_config['system_instructions'],
+                'allowed_channels': default_config['allowed_channels']
+            }).execute()
+            guild_config_cache[guild_id] = default_config
+            return default_config
     except Exception as e:
         print(f'Error fetching config: {e}')
     
-    return bot_config_cache
+    return get_default_config()
 
 
-async def get_conversation_memory(channel_id: str) -> str:
-    """Get conversation summary for a channel."""
+async def get_conversation_memory(guild_id: str, channel_id: str) -> str:
+    """Get conversation summary for a channel in a guild."""
     if not supabase:
         return ''
     
     try:
-        result = supabase.table('conversation_memory').select('summary').eq('channel_id', channel_id).limit(1).execute()
+        result = supabase.table('conversation_memory').select('summary').eq('guild_id', guild_id).eq('channel_id', channel_id).limit(1).execute()
         if result.data:
             row: Dict[str, Any] = dict(result.data[0])  # type: ignore
             return str(row.get('summary', ''))
@@ -382,14 +409,14 @@ async def get_conversation_memory(channel_id: str) -> str:
     return ''
 
 
-async def update_conversation_memory(channel_id: str, new_message: str, bot_response: str):
+async def update_conversation_memory(guild_id: str, channel_id: str, new_message: str, bot_response: str):
     """Update conversation memory with new exchange."""
     if not supabase or not hf_available:
         return
     
     try:
         # Get existing memory
-        existing = supabase.table('conversation_memory').select('*').eq('channel_id', channel_id).limit(1).execute()
+        existing = supabase.table('conversation_memory').select('*').eq('guild_id', guild_id).eq('channel_id', channel_id).limit(1).execute()
         
         current_summary: str = ''
         message_count: int = 0
@@ -413,22 +440,24 @@ Create a brief updated summary of the conversation so far (max 200 words):"""
         
         # Upsert memory
         supabase.table('conversation_memory').upsert({
+            'guild_id': guild_id,
             'channel_id': channel_id,
             'summary': current_summary,
             'message_count': message_count + 1
-        }, on_conflict='channel_id').execute()
+        }, on_conflict='guild_id,channel_id').execute()
         
     except Exception as e:
         print(f'Error updating memory: {e}')
 
 
-async def save_message(channel_id: str, user_id: str, username: str, content: str, bot_response: Optional[str] = None):
+async def save_message(guild_id: str, channel_id: str, user_id: str, username: str, content: str, bot_response: Optional[str] = None):
     """Save message to database."""
     if not supabase:
         return
     
     try:
         supabase.table('messages').insert({
+            'guild_id': guild_id,
             'channel_id': channel_id,
             'user_id': user_id,
             'username': username,
@@ -444,16 +473,17 @@ async def generate_ai_response(message: discord.Message, config: dict) -> str:
     if not hf_available:
         return "AI is not configured. Please set HF_API_KEY."
     
+    guild_id = str(message.guild.id) if message.guild else ''
     channel_id = str(message.channel.id)
     user_query = message.content
     
     # Get conversation memory
-    memory = await get_conversation_memory(channel_id)
+    memory = await get_conversation_memory(guild_id, channel_id)
     
     # Search knowledge base for relevant context (RAG)
     knowledge_context = ""
     if embedding_available:
-        relevant_docs = await search_knowledge_base(user_query, match_count=3)
+        relevant_docs = await search_knowledge_base(guild_id, user_query, match_count=3)
         if relevant_docs:
             knowledge_context = "\n\n📚 **Relevant Knowledge Base Context:**\n"
             for doc in relevant_docs:
@@ -504,10 +534,9 @@ async def on_ready():
     # Check Hugging Face API connection
     await check_hf_api()
     
-    # Fetch initial config
-    await fetch_bot_config()
-    channels_count = len(bot_config_cache["allowed_channels"])
-    print(f'Loaded config - Allowed channels: {"All" if channels_count == 0 else channels_count}')
+    # List connected guilds
+    for guild in bot.guilds:
+        print(f'  - {guild.name} (ID: {guild.id})')
     
     # Sync slash commands
     try:
@@ -535,10 +564,12 @@ async def on_message(message: discord.Message):
     if message.content.startswith(str(bot.command_prefix)):
         return
     
-    # Refresh config periodically
-    config = await fetch_bot_config()
-    
+    guild_id = str(message.guild.id)
+    guild_name = message.guild.name
     channel_id = str(message.channel.id)
+    
+    # Get per-guild config
+    config = await fetch_bot_config(guild_id, guild_name)
     
     # Check if channel is allowed or if bot is mentioned
     is_allowed = len(config['allowed_channels']) == 0 or channel_id in config['allowed_channels']
@@ -561,6 +592,7 @@ async def on_message(message: discord.Message):
         
         # Save to database
         await save_message(
+            guild_id,
             channel_id,
             str(message.author.id),
             message.author.display_name,
@@ -569,7 +601,7 @@ async def on_message(message: discord.Message):
         )
         
         # Update memory
-        await update_conversation_memory(channel_id, message.content, response)
+        await update_conversation_memory(guild_id, channel_id, message.content, response)
 
 
 @bot.event
@@ -590,14 +622,18 @@ async def ping(ctx):
 @commands.has_permissions(administrator=True)
 async def reload_config(ctx):
     """Reload bot configuration from database."""
-    await fetch_bot_config()
+    guild_id = str(ctx.guild.id) if ctx.guild else ''
+    guild_name = ctx.guild.name if ctx.guild else None
+    await fetch_bot_config(guild_id, guild_name)
     await ctx.send('✅ Configuration reloaded!')
 
 
 @bot.command(name='status')
 async def status(ctx):
     """Check bot status and configuration."""
-    config = bot_config_cache
+    guild_id = str(ctx.guild.id) if ctx.guild else ''
+    guild_name = ctx.guild.name if ctx.guild else None
+    config = await fetch_bot_config(guild_id, guild_name)
     embed = discord.Embed(
         title='🤖 DasAI Status',
         color=discord.Color.green() if hf_available else discord.Color.red()
@@ -626,16 +662,18 @@ async def ask(interaction: discord.Interaction, question: str):
     """Slash command to ask the AI a question."""
     await interaction.response.defer()
     
-    config = await fetch_bot_config()
+    guild_id = str(interaction.guild_id) if interaction.guild_id else ''
+    guild_name = interaction.guild.name if interaction.guild else None
+    config = await fetch_bot_config(guild_id, guild_name)
     
     if not hf_available:
         await interaction.followup.send("AI is not configured. Set HF_API_KEY in environment.")
         return
     
-    # Search knowledge base for relevant context
+    # Search knowledge base for relevant context (per-guild)
     knowledge_context = ""
     if embedding_available:
-        relevant_docs = await search_knowledge_base(question, match_count=3)
+        relevant_docs = await search_knowledge_base(guild_id, question, match_count=3)
         if relevant_docs:
             knowledge_context = "\n\nRelevant Knowledge:\n"
             for doc in relevant_docs:
@@ -681,10 +719,11 @@ async def memory_reset(interaction: discord.Interaction):
     try:
         # Upsert an empty memory for this channel
         supabase.table('conversation_memory').upsert({
+            'guild_id': guild_id,
             'channel_id': channel_id,
             'summary': '',
             'message_count': 0
-        }, on_conflict='channel_id').execute()
+        }, on_conflict='guild_id,channel_id').execute()
 
         await interaction.followup.send("✅ Conversation memory reset for this channel.")
     except Exception as e:
@@ -710,9 +749,10 @@ async def allowlist_add(interaction: discord.Interaction):
 
     channel_id = str(interaction.channel_id)
     try:
-        result = supabase.table('bot_config').select('id, allowed_channels').limit(1).execute()
+        # Get this guild's config
+        result = supabase.table('bot_config').select('id, allowed_channels').eq('guild_id', guild_id).limit(1).execute()
         if not result.data:
-            await interaction.followup.send("❌ No bot configuration found.")
+            await interaction.followup.send("❌ No bot configuration found for this server. Run `/setup` first.")
             return
 
         row: Dict[str, Any] = dict(result.data[0])  # type: ignore
@@ -725,6 +765,11 @@ async def allowlist_add(interaction: discord.Interaction):
 
         allowed.append(channel_id)
         supabase.table('bot_config').update({'allowed_channels': allowed}).eq('id', config_id).execute()
+        
+        # Update cache
+        if guild_id in guild_config_cache:
+            guild_config_cache[guild_id]['allowed_channels'] = allowed
+            
         await interaction.followup.send("✅ Channel added to allow-list.")
     except Exception as e:
         await interaction.followup.send(f"❌ Error: {e}")
@@ -897,7 +942,7 @@ async def knowledge_add(interaction: discord.Interaction, title: str, content: s
     if not embedding_available:
         await interaction.followup.send("⚠️ Embeddings not available. Document will be added without semantic search capability.")
     
-    success = await add_document_to_knowledge_base(title, content)
+    success = await add_document_to_knowledge_base(guild_id, title, content)
     
     if success:
         await interaction.followup.send(f"✅ Added document: **{title}**")
@@ -912,10 +957,11 @@ async def knowledge_search(interaction: discord.Interaction, query: str):
     await interaction.response.defer()
     
     if not embedding_available:
-        await interaction.followup.send("❌ Embeddings not available. Run `ollama pull nomic-embed-text` to enable RAG.")
+        await interaction.followup.send("❌ Embeddings not available. Set HF_API_KEY to enable RAG.")
         return
     
-    results = await search_knowledge_base(query, match_count=5)
+    guild_id = str(interaction.guild_id) if interaction.guild_id else ''
+    results = await search_knowledge_base(guild_id, query, match_count=5)
     
     if not results:
         await interaction.followup.send("No matching documents found.")
@@ -948,8 +994,10 @@ async def knowledge_list(interaction: discord.Interaction):
         await interaction.followup.send("❌ Database not configured.")
         return
     
+    guild_id = str(interaction.guild_id) if interaction.guild_id else ''
+    
     try:
-        result = supabase.table('knowledge_documents').select('id, title, created_at').order('created_at', desc=True).limit(20).execute()
+        result = supabase.table('knowledge_documents').select('id, title, created_at').eq('guild_id', guild_id).order('created_at', desc=True).limit(20).execute()
         
         if not result.data:
             await interaction.followup.send("📚 Knowledge base is empty.")
@@ -990,7 +1038,7 @@ async def knowledge_delete(interaction: discord.Interaction, title: str):
         return
     
     try:
-        result = supabase.table('knowledge_documents').delete().ilike('title', f'%{title}%').execute()
+        result = supabase.table('knowledge_documents').delete().eq('guild_id', guild_id).ilike('title', f'%{title}%').execute()
         
         if result.data:
             count = len(result.data)

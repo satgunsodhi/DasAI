@@ -8,13 +8,15 @@ CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 -- NOTE: In Supabase, go to Database > Extensions and enable "vector" first
 CREATE EXTENSION IF NOT EXISTS "vector";
 
--- Bot Configuration Table
+-- Bot Configuration Table (per-guild configuration)
+-- Each Discord server gets its own configuration
 CREATE TABLE IF NOT EXISTS bot_config (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    guild_id TEXT NOT NULL UNIQUE,
+    guild_name TEXT,
     bot_name TEXT NOT NULL DEFAULT 'DasAI Assistant',
     system_instructions TEXT NOT NULL DEFAULT 'You are a helpful AI assistant.',
     allowed_channels TEXT[] DEFAULT '{}',
-    setup_complete BOOLEAN DEFAULT FALSE,
     created_at TIMESTAMPTZ DEFAULT NOW(),
     updated_at TIMESTAMPTZ DEFAULT NOW()
 );
@@ -33,18 +35,22 @@ CREATE TABLE IF NOT EXISTS user_roles (
 );
 
 -- Conversation Memory Table (for rolling summaries)
+-- Now includes guild_id for multi-server support
 CREATE TABLE IF NOT EXISTS conversation_memory (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    channel_id TEXT NOT NULL UNIQUE,
+    guild_id TEXT NOT NULL,
+    channel_id TEXT NOT NULL,
     summary TEXT NOT NULL DEFAULT '',
     message_count INTEGER DEFAULT 0,
     created_at TIMESTAMPTZ DEFAULT NOW(),
-    updated_at TIMESTAMPTZ DEFAULT NOW()
+    updated_at TIMESTAMPTZ DEFAULT NOW(),
+    UNIQUE(guild_id, channel_id)
 );
 
 -- Message History Table (for context)
 CREATE TABLE IF NOT EXISTS messages (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    guild_id TEXT NOT NULL,
     channel_id TEXT NOT NULL,
     user_id TEXT NOT NULL,
     username TEXT NOT NULL,
@@ -53,10 +59,11 @@ CREATE TABLE IF NOT EXISTS messages (
     created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
--- Knowledge Documents Table (RAG)
+-- Knowledge Documents Table (RAG) - per-guild
 -- Uses sentence-transformers/all-MiniLM-L6-v2 from Hugging Face (384 dimensions)
 CREATE TABLE IF NOT EXISTS knowledge_documents (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    guild_id TEXT NOT NULL,
     title TEXT NOT NULL,
     filename TEXT,
     content TEXT NOT NULL,
@@ -70,10 +77,14 @@ CREATE TABLE IF NOT EXISTS knowledge_documents (
 CREATE INDEX IF NOT EXISTS idx_knowledge_embedding ON knowledge_documents 
 USING ivfflat (embedding vector_cosine_ops) WITH (lists = 100);
 
--- Function for similarity search
+-- Index for guild-based queries
+CREATE INDEX IF NOT EXISTS idx_knowledge_guild ON knowledge_documents(guild_id);
+
+-- Function for similarity search (now includes guild_id filter)
 CREATE OR REPLACE FUNCTION search_documents(
+    p_guild_id TEXT,
     query_embedding vector(384),
-    match_threshold FLOAT DEFAULT 0.7,
+    match_threshold FLOAT DEFAULT 0.5,
     match_count INT DEFAULT 5
 )
 RETURNS TABLE (
@@ -92,7 +103,8 @@ BEGIN
         kd.content,
         1 - (kd.embedding <=> query_embedding) AS similarity
     FROM knowledge_documents kd
-    WHERE kd.embedding IS NOT NULL
+    WHERE kd.guild_id = p_guild_id
+        AND kd.embedding IS NOT NULL
         AND 1 - (kd.embedding <=> query_embedding) > match_threshold
     ORDER BY kd.embedding <=> query_embedding
     LIMIT match_count;
@@ -101,8 +113,11 @@ $$;
 
 -- Indexes for performance
 CREATE INDEX IF NOT EXISTS idx_messages_channel_id ON messages(channel_id);
+CREATE INDEX IF NOT EXISTS idx_messages_guild_id ON messages(guild_id);
 CREATE INDEX IF NOT EXISTS idx_messages_created_at ON messages(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_conversation_memory_channel_id ON conversation_memory(channel_id);
+CREATE INDEX IF NOT EXISTS idx_conversation_memory_guild_id ON conversation_memory(guild_id);
+CREATE INDEX IF NOT EXISTS idx_bot_config_guild_id ON bot_config(guild_id);
 
 -- Row Level Security (RLS)
 ALTER TABLE bot_config ENABLE ROW LEVEL SECURITY;
@@ -151,21 +166,8 @@ CREATE POLICY "Allow service role full access to user_roles" ON user_roles
 -- RLS for user_roles table
 ALTER TABLE user_roles ENABLE ROW LEVEL SECURITY;
 
--- Insert default configuration
--- Empty allowed_channels array means ALL channels are allowed
-INSERT INTO bot_config (bot_name, system_instructions, allowed_channels, setup_complete)
-VALUES (
-    'DasAI Assistant',
-    'You are a helpful AI assistant for a Discord server. Be friendly, concise, and helpful.
-
-Key behaviors:
-- Answer questions accurately and helpfully
-- Be conversational but professional
-- If you don''t know something, say so
-- Keep responses concise unless detail is requested',
-    '{}',  -- Empty array = all channels allowed
-    FALSE
-) ON CONFLICT DO NOTHING;
+-- Note: Default configuration is now created automatically per-guild when the bot joins a server
+-- The bot.py auto-creates a config entry for each guild on first interaction
 
 -- Function to update timestamp
 CREATE OR REPLACE FUNCTION update_updated_at_column()

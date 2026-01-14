@@ -33,10 +33,12 @@ The project is built with a Python-based Discord bot, a Next.js admin panel, and
 
 | Feature | Description |
 |---------|-------------|
-| 🤖 **AI-Powered Chat** | Responds to messages using Hugging Face Inference API models (Mistral-7B) |
+| 🤖 **AI-Powered Chat** | Responds to messages using Hugging Face Inference API models (Llama-3.2) |
 | 📚 **Knowledge Base (RAG)** | Vector database with semantic search for context-aware responses |
 | 🧠 **Conversation Memory** | Rolling summaries maintain context across long conversations |
 | 🎛️ **Admin Dashboard** | Secure Next.js web UI for bot configuration and management |
+| 🌐 **Multi-Server Support** | Deploy to multiple Discord servers with per-server configuration |
+| 👑 **Role-Based Access** | Team Lead and Member roles for access control |
 | 🐳 **Docker Ready** | Containerized deployment with Railway support |
 | ⚡ **Slash Commands** | Modern Discord interactions for knowledge management |
 | 🎭 **Custom Personality** | Define bot persona via system instructions |
@@ -386,14 +388,20 @@ The repository includes `Dockerfile` and `railway.json` for easy deployment:
 
 ### Slash Commands
 
-| Command | Description | Example |
-|---------|-------------|---------|
-| `/ask <question>` | Ask the AI directly | `/ask What is DasAI?` |
-| `/ping` | Check bot latency | `/ping` |
-| `/knowledge_add <title> <content>` | Add to knowledge base | `/knowledge_add FAQ Our hours are 9-5` |
-| `/knowledge_search <query>` | Semantic search | `/knowledge_search business hours` |
-| `/knowledge_list` | List all documents | `/knowledge_list` |
-| `/knowledge_delete <title>` | Delete document | `/knowledge_delete FAQ` |
+| Command | Description | Permission |
+|---------|-------------|------------|
+| `/setup` | Register as the first Team Lead | First user only |
+| `/ask <question>` | Ask the AI directly | Everyone |
+| `/ping` | Check bot latency | Everyone |
+| `/knowledge_add <title> <content>` | Add to knowledge base | Team Lead |
+| `/knowledge_search <query>` | Semantic search | Everyone |
+| `/knowledge_list` | List all documents | Everyone |
+| `/knowledge_delete <title>` | Delete document | Team Lead |
+| `/memory_reset` | Clear conversation memory | Team Lead |
+| `/allowlist_add` | Allow bot in current channel | Team Lead |
+| `/role_assign @user <role>` | Assign Team Lead or Member role | Team Lead |
+| `/role_remove @user` | Remove a user's role | Team Lead |
+| `/role_list` | View all roles in this server | Everyone |
 
 ### Prefix Commands
 
@@ -402,7 +410,31 @@ The repository includes `Dockerfile` and `railway.json` for easy deployment:
 | `!ping` | Legacy ping command |
 | `!status` | Show bot status and configuration |
 | `!sync` | Sync slash commands (admin only) |
-| `!refresh` | Refresh bot configuration |
+| `!reload` | Reload bot configuration |
+
+### Role-Based Access Control
+
+DasAI uses a two-tier role system:
+
+| Role | Permissions |
+|------|-------------|
+| **Team Lead** 👑 | Full access: manage knowledge base, memory, channels, and assign roles |
+| **Member** 👤 | Basic access: ask questions, search knowledge base |
+
+The first user to run `/setup` in a server becomes the Team Lead and can then assign roles to others.
+
+---
+
+## Multi-Server Support
+
+DasAI supports deployment to multiple Discord servers with isolated configuration:
+
+- **Per-Server Configuration**: Each server has its own bot name, instructions, and allowed channels
+- **Isolated Knowledge Base**: Documents are stored per-server
+- **Separate Memory**: Conversation memory is tracked per-channel, per-server
+- **Independent Roles**: Team Leads and Members are assigned per-server
+
+The admin dashboard includes a server selector to manage each Discord server independently.
 
 ---
 

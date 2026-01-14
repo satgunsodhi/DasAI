@@ -3,7 +3,7 @@
 import { useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { createClient } from '@/lib/supabase/client'
-import { Bot, Loader2 } from 'lucide-react'
+import { Bot, Loader2, Sparkles } from 'lucide-react'
 
 export default function LoginForm() {
   const [email, setEmail] = useState('')
@@ -38,25 +38,36 @@ export default function LoginForm() {
   }
 
   return (
-    <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-gray-900 via-gray-800 to-gray-900">
-      <div className="w-full max-w-md p-8 bg-gray-800/50 backdrop-blur-sm rounded-2xl shadow-2xl border border-gray-700">
-        <div className="flex flex-col items-center mb-8">
-          <div className="w-16 h-16 bg-indigo-600 rounded-2xl flex items-center justify-center mb-4">
-            <Bot className="w-8 h-8 text-white" />
+    <div className="min-h-screen flex items-center justify-center bg-[#0a0a0a] bg-pattern">
+      {/* Ambient glow effects */}
+      <div className="fixed inset-0 overflow-hidden pointer-events-none">
+        <div className="absolute top-1/4 left-1/4 w-96 h-96 bg-blue-500/10 rounded-full blur-[128px]" />
+        <div className="absolute bottom-1/4 right-1/4 w-96 h-96 bg-violet-500/10 rounded-full blur-[128px]" />
+      </div>
+      
+      <div className="relative w-full max-w-md p-8 glass-card rounded-3xl shadow-2xl">
+        <div className="flex flex-col items-center mb-10">
+          <div className="relative mb-6">
+            <div className="w-16 h-16 bg-gradient-to-br from-blue-500 to-violet-600 rounded-2xl flex items-center justify-center shadow-lg shadow-blue-500/25">
+              <Bot className="w-8 h-8 text-white" />
+            </div>
+            <div className="absolute -top-1 -right-1 w-4 h-4 bg-emerald-400 rounded-full border-2 border-[#0a0a0a] flex items-center justify-center">
+              <Sparkles className="w-2 h-2 text-white" />
+            </div>
           </div>
-          <h1 className="text-2xl font-bold text-white">DasAI Admin</h1>
-          <p className="text-gray-400 mt-2">Sign in to manage your Discord Copilot</p>
+          <h1 className="text-2xl font-semibold text-white tracking-tight">Welcome back</h1>
+          <p className="text-zinc-500 mt-2">Sign in to DasAI Control Center</p>
         </div>
 
         <form onSubmit={handleLogin} className="space-y-6">
           {error && (
-            <div className="p-3 bg-red-500/10 border border-red-500/50 rounded-lg text-red-400 text-sm">
+            <div className="p-4 bg-red-500/10 border border-red-500/20 rounded-xl text-red-400 text-sm">
               {error}
             </div>
           )}
 
-          <div>
-            <label htmlFor="email" className="block text-sm font-medium text-gray-300 mb-2">
+          <div className="space-y-2">
+            <label htmlFor="email" className="block text-sm font-medium text-zinc-400">
               Email
             </label>
             <input
@@ -64,14 +75,14 @@ export default function LoginForm() {
               type="email"
               value={email}
               onChange={(e) => setEmail(e.target.value)}
-              className="w-full px-4 py-3 bg-gray-700/50 border border-gray-600 rounded-lg text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent transition"
+              className="w-full px-4 py-3 input-elegant rounded-xl text-white placeholder-zinc-600 focus:outline-none"
               placeholder="admin@example.com"
               required
             />
           </div>
 
-          <div>
-            <label htmlFor="password" className="block text-sm font-medium text-gray-300 mb-2">
+          <div className="space-y-2">
+            <label htmlFor="password" className="block text-sm font-medium text-zinc-400">
               Password
             </label>
             <input
@@ -79,7 +90,7 @@ export default function LoginForm() {
               type="password"
               value={password}
               onChange={(e) => setPassword(e.target.value)}
-              className="w-full px-4 py-3 bg-gray-700/50 border border-gray-600 rounded-lg text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent transition"
+              className="w-full px-4 py-3 input-elegant rounded-xl text-white placeholder-zinc-600 focus:outline-none"
               placeholder="••••••••"
               required
             />
@@ -88,7 +99,7 @@ export default function LoginForm() {
           <button
             type="submit"
             disabled={loading}
-            className="w-full py-3 px-4 bg-indigo-600 hover:bg-indigo-700 disabled:bg-indigo-800 disabled:cursor-not-allowed text-white font-medium rounded-lg transition flex items-center justify-center gap-2"
+            className="w-full py-3.5 px-4 btn-primary text-white font-medium rounded-xl disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
           >
             {loading ? (
               <>
@@ -100,6 +111,10 @@ export default function LoginForm() {
             )}
           </button>
         </form>
+
+        <p className="mt-8 text-center text-xs text-zinc-600">
+          Powered by Hugging Face • Supabase • Railway.app
+        </p>
       </div>
     </div>
   )
