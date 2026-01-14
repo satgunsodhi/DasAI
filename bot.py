@@ -290,18 +290,14 @@ async def get_user_role(guild_id: str, user_id: str) -> Optional[str]:
     return None
 
 
-async def is_team_lead(guild_id: str, user_id: str) -> bool:
-    """Check if a user is a team lead."""
-    role = await get_user_role(guild_id, user_id)
-    is_lead = role == 'team_lead'
-    print(f'is_team_lead: user_id={user_id}, guild_id={guild_id}, role={role}, is_lead={is_lead}')
-    return is_lead
+async def set_user_role(guild_id: str, user_id: str, username: str, role: str) -> bool:
     """Set a user's role in the database."""
     if not supabase:
         print('set_user_role: supabase not configured')
         return False
     
     try:
+        print(f'set_user_role: Upserting {username} ({user_id}) as {role} in guild {guild_id}')
         result = supabase.table('user_roles').upsert({
             'guild_id': guild_id,
             'user_id': user_id,
@@ -309,7 +305,7 @@ async def is_team_lead(guild_id: str, user_id: str) -> bool:
             'role': role
         }, on_conflict='guild_id,user_id').execute()
         
-        print(f'set_user_role: Upsert result for {username} ({user_id}) as {role}: {result}')
+        print(f'set_user_role: Upsert result: {result}')
         
         # Update cache
         if guild_id not in role_cache:
@@ -317,8 +313,16 @@ async def is_team_lead(guild_id: str, user_id: str) -> bool:
         role_cache[guild_id][user_id] = role
         return True
     except Exception as e:
-        print(f'Error setting user role: {e}')
+        print(f'set_user_role: Error - {e}')
         return False
+
+
+async def is_team_lead(guild_id: str, user_id: str) -> bool:
+    """Check if a user is a team lead."""
+    role = await get_user_role(guild_id, user_id)
+    is_lead = role == 'team_lead'
+    print(f'is_team_lead: user_id={user_id}, guild_id={guild_id}, role={role}, is_lead={is_lead}')
+    return is_lead
 
 
 async def remove_user_role(guild_id: str, user_id: str) -> bool:
@@ -336,12 +340,6 @@ async def remove_user_role(guild_id: str, user_id: str) -> bool:
     except Exception as e:
         print(f'Error removing user role: {e}')
         return False
-
-
-async def is_team_lead(guild_id: str, user_id: str) -> bool:
-    """Check if a user is a team lead."""
-    role = await get_user_role(guild_id, user_id)
-    return role == 'team_lead'
 
 
 async def has_any_team_lead(guild_id: str) -> bool:
