@@ -972,20 +972,14 @@ async def role_list(interaction: discord.Interaction):
 @bot.tree.command(name='knowledge_add', description='Add a document to the knowledge base')
 @app_commands.describe(title='Title for the document', content='The content to add')
 async def knowledge_add(interaction: discord.Interaction, title: str, content: str):
-    """Add a document to the knowledge base. Team Lead only."""
+    """Add a document to the knowledge base. Anyone can add."""
     await interaction.response.defer()
     
     if not supabase:
         await interaction.followup.send("❌ Database not configured.")
         return
     
-    # Check if user is team lead
     guild_id = str(interaction.guild_id) if interaction.guild_id else ''
-    user_id = str(interaction.user.id)
-    
-    if not await is_team_lead(guild_id, user_id):
-        await interaction.followup.send("❌ Only Team Leads can add to the knowledge base.")
-        return
     
     if not embedding_available:
         await interaction.followup.send("⚠️ Embeddings not available. Document will be added without semantic search capability.")
