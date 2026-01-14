@@ -4,10 +4,20 @@ from discord import app_commands
 import os
 import sys
 import asyncio
+import io
+import aiohttp
 from dotenv import load_dotenv
 from typing import Optional, Any, Dict, List
 from supabase import create_client, Client
 from huggingface_hub import InferenceClient
+
+# PDF parsing
+try:
+    from PyPDF2 import PdfReader
+    pdf_available = True
+except ImportError:
+    pdf_available = False
+    print('PyPDF2 not installed. PDF upload will be disabled.')
 
 # Load environment variables
 load_dotenv()
@@ -235,6 +245,68 @@ async def add_document_to_knowledge_base(guild_id: str, title: str, content: str
         print(f'Error adding document: {e}')
         return False
 
+
+async def extract_text_from_pdf(file_bytes: bytes) -> Optional[str]:
+    """Extract text content from a PDF file."""
+    if not pdf_available:
+        return None
+    
+    try:
+        pdf_file = io.BytesIO(file_bytes)
+        reader = PdfReader(pdf_file)
+        
+        text_content = []
+        for page in reader.pages:
+            page_text = page.extract_text()
+            if page_text:
+                text_content.append(page_text)
+        
+        return '\n\n'.join(text_content) if text_content else None
+    except Exception as e:
+        print(f'Error extracting PDF text: {e}')
+        return None
+
+
+async def download_attachment(url: str) -> Optional[bytes]:
+    """Download file content from a Discord attachment URL."""
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url) as response:
+                if response.status == 200:
+                    return await response.read()
+    except Exception as e:
+        print(f'Error downloading attachment: {e}')
+    return None
+
+
+async def get_knowledge_document(guild_id: str, doc_id: str) -> Optional[Dict[str, Any]]:
+    """Get a single document from the knowledge base by ID."""
+    if not supabase:
+        return None
+    
+    try:
+        result = supabase.table('knowledge_documents').select('*').eq('guild_id', guild_id).eq('id', doc_id).single().execute()
+        if result.data:
+            return dict(result.data)
+    except Exception as e:
+        print(f'Error fetching document: {e}')
+    return None
+
+
+async def get_knowledge_documents(guild_id: str, limit: int = 50) -> List[Dict[str, Any]]:
+    """Get all documents for a guild."""
+    if not supabase:
+        return []
+    
+    try:
+        result = supabase.table('knowledge_documents').select('id, title, filename, created_at, chunk_index, metadata').eq('guild_id', guild_id).order('created_at', desc=True).limit(limit).execute()
+        if result.data:
+            return [dict(row) for row in result.data]
+    except Exception as e:
+        print(f'Error fetching documents: {e}')
+    return []
+
+
 # Bot setup with intents
 intents = discord.Intents.default()
 intents.message_content = True
@@ -242,11 +314,15 @@ intents.members = True
 
 bot = commands.Bot(command_prefix='!', intents=intents)
 
-# Cache for bot configuration per guild
+# Cache for bot configuration per guild with timestamps
 guild_config_cache: Dict[str, Dict[str, Any]] = {}  # guild_id -> config
+guild_config_cache_time: Dict[str, float] = {}  # guild_id -> timestamp
+CONFIG_CACHE_TTL = 60  # seconds - refresh config every minute
 
 # Role cache per guild
 role_cache: Dict[str, Dict[str, str]] = {}  # guild_id -> {user_id -> role}
+
+import time
 
 
 def get_default_config() -> Dict[str, Any]:
@@ -379,9 +455,12 @@ async def fetch_bot_config(guild_id: str, guild_name: Optional[str] = None) -> D
     if not supabase:
         return get_default_config()
     
-    # Check cache first
+    # Check cache with TTL
+    current_time = time.time()
     if guild_id in guild_config_cache:
-        return guild_config_cache[guild_id]
+        cache_age = current_time - guild_config_cache_time.get(guild_id, 0)
+        if cache_age < CONFIG_CACHE_TTL:
+            return guild_config_cache[guild_id]
     
     try:
         result = supabase.table('bot_config').select('*').eq('guild_id', guild_id).limit(1).execute()
@@ -392,6 +471,7 @@ async def fetch_bot_config(guild_id: str, guild_name: Optional[str] = None) -> D
                 'allowed_channels': list(config.get('allowed_channels', [])),
                 'bot_name': str(config.get('bot_name', 'DasAI Assistant'))
             }
+            guild_config_cache_time[guild_id] = current_time
             return guild_config_cache[guild_id]
         else:
             # Create default config for this guild
@@ -404,6 +484,7 @@ async def fetch_bot_config(guild_id: str, guild_name: Optional[str] = None) -> D
                 'allowed_channels': default_config['allowed_channels']
             }).execute()
             guild_config_cache[guild_id] = default_config
+            guild_config_cache_time[guild_id] = current_time
             return default_config
     except Exception as e:
         print(f'Error fetching config: {e}')
@@ -664,6 +745,34 @@ async def status(ctx):
     embed.add_field(name='Hugging Face', value='✅ Connected' if hf_available else '❌ Not available', inline=True)
     embed.add_field(name='RAG/Embeddings', value='✅ Enabled' if embedding_available else '❌ Disabled', inline=True)
     await ctx.send(embed=embed)
+
+
+@bot.tree.command(name='config_refresh', description='Refresh bot configuration from database (Team Lead only)')
+async def config_refresh(interaction: discord.Interaction):
+    """Force refresh the bot configuration cache. Team Lead only."""
+    guild_id = str(interaction.guild_id) if interaction.guild_id else ''
+    user_id = str(interaction.user.id)
+    
+    # Check if user is team lead
+    if not await is_team_lead(guild_id, user_id):
+        await interaction.response.send_message("❌ Only Team Leads can refresh configuration.", ephemeral=True)
+        return
+    
+    # Clear cache for this guild
+    if guild_id in guild_config_cache:
+        del guild_config_cache[guild_id]
+    if guild_id in guild_config_cache_time:
+        del guild_config_cache_time[guild_id]
+    
+    # Fetch fresh config
+    config = await fetch_bot_config(guild_id, interaction.guild.name if interaction.guild else None)
+    
+    await interaction.response.send_message(
+        f"✅ Configuration refreshed!\n"
+        f"• Bot Name: **{config['bot_name']}**\n"
+        f"• Allowed Channels: **{len(config['allowed_channels']) or 'All'}**",
+        ephemeral=True
+    )
 
 
 # Slash command examples
@@ -1087,6 +1196,125 @@ async def knowledge_delete(interaction: discord.Interaction, title: str):
             await interaction.followup.send(f"✅ Deleted {count} document(s) matching: **{title}**")
         else:
             await interaction.followup.send(f"❌ No documents found matching: **{title}**")
+    except Exception as e:
+        await interaction.followup.send(f"❌ Error: {e}")
+
+
+@bot.tree.command(name='knowledge_upload', description='Upload a file to the knowledge base (PDF or TXT)')
+@app_commands.describe(title='Title for the document', file='The file to upload (PDF or TXT)')
+async def knowledge_upload(interaction: discord.Interaction, title: str, file: discord.Attachment):
+    """Upload a file to the knowledge base. Supports PDF and TXT files."""
+    await interaction.response.defer()
+    
+    if not supabase:
+        await interaction.followup.send("❌ Database not configured.")
+        return
+    
+    guild_id = str(interaction.guild_id) if interaction.guild_id else ''
+    filename = file.filename.lower()
+    
+    # Check file type
+    if not (filename.endswith('.pdf') or filename.endswith('.txt') or filename.endswith('.md')):
+        await interaction.followup.send("❌ Unsupported file type. Please upload a PDF, TXT, or MD file.")
+        return
+    
+    # Check file size (max 10MB)
+    if file.size > 10 * 1024 * 1024:
+        await interaction.followup.send("❌ File too large. Maximum size is 10MB.")
+        return
+    
+    # Download the file
+    file_bytes = await download_attachment(file.url)
+    if not file_bytes:
+        await interaction.followup.send("❌ Failed to download file.")
+        return
+    
+    # Extract text content
+    content = None
+    if filename.endswith('.pdf'):
+        if not pdf_available:
+            await interaction.followup.send("❌ PDF support is not installed. Please upload a TXT file instead.")
+            return
+        content = await extract_text_from_pdf(file_bytes)
+        if not content:
+            await interaction.followup.send("❌ Failed to extract text from PDF. The file may be image-based or corrupted.")
+            return
+    else:
+        # TXT or MD file
+        try:
+            content = file_bytes.decode('utf-8')
+        except UnicodeDecodeError:
+            try:
+                content = file_bytes.decode('latin-1')
+            except:
+                await interaction.followup.send("❌ Failed to read file. Unsupported encoding.")
+                return
+    
+    if not content or len(content.strip()) == 0:
+        await interaction.followup.send("❌ File appears to be empty.")
+        return
+    
+    # Add to knowledge base
+    success = await add_document_to_knowledge_base(guild_id, title, content, filename=file.filename)
+    
+    if success:
+        char_count = len(content)
+        await interaction.followup.send(
+            f"✅ Uploaded **{file.filename}** as **{title}**\n"
+            f"📄 {char_count:,} characters extracted"
+        )
+    else:
+        await interaction.followup.send("❌ Failed to add document to knowledge base.")
+
+
+@bot.tree.command(name='knowledge_view', description='View a document from the knowledge base')
+@app_commands.describe(title='Title of the document to view')
+async def knowledge_view(interaction: discord.Interaction, title: str):
+    """View the content of a knowledge base document."""
+    await interaction.response.defer()
+    
+    if not supabase:
+        await interaction.followup.send("❌ Database not configured.")
+        return
+    
+    guild_id = str(interaction.guild_id) if interaction.guild_id else ''
+    
+    try:
+        # Search for document by title
+        result = supabase.table('knowledge_documents').select('*').eq('guild_id', guild_id).ilike('title', f'%{title}%').order('chunk_index').execute()
+        
+        if not result.data:
+            await interaction.followup.send(f"❌ No document found matching: **{title}**")
+            return
+        
+        # Combine all chunks
+        docs = [dict(row) for row in result.data]
+        full_content = '\n\n'.join(doc.get('content', '') for doc in docs)
+        doc_title = docs[0].get('title', 'Untitled')
+        doc_filename = docs[0].get('filename', '')
+        
+        # Create embed
+        embed = discord.Embed(
+            title=f'📄 {doc_title}',
+            color=discord.Color.blue()
+        )
+        
+        if doc_filename:
+            embed.add_field(name='Source File', value=doc_filename, inline=True)
+        
+        embed.add_field(name='Chunks', value=str(len(docs)), inline=True)
+        embed.add_field(name='Characters', value=f'{len(full_content):,}', inline=True)
+        
+        # Truncate content for Discord (max 4096 for embed description)
+        if len(full_content) > 4000:
+            preview = full_content[:4000] + '\n\n*... (content truncated)*'
+        else:
+            preview = full_content
+        
+        embed.description = f"```\n{preview[:4000]}\n```"
+        
+        await interaction.followup.send(embed=embed)
+        
     except Exception as e:
         await interaction.followup.send(f"❌ Error: {e}")
 

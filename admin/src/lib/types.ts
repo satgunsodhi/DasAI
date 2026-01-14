@@ -35,8 +35,11 @@ export interface Message {
 export interface KnowledgeDocument {
   id: string
   guild_id: string
-  filename: string
+  title: string
+  filename: string | null
   content: string
+  chunk_index: number
+  metadata: Record<string, unknown> | null
   embedding?: number[]
   created_at: string
 }

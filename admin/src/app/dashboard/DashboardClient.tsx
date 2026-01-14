@@ -1,10 +1,10 @@
 'use client'
 
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { createClient } from '@/lib/supabase/client'
 import { useRouter } from 'next/navigation'
 import type { User } from '@supabase/supabase-js'
-import type { BotConfig, ConversationMemory, UserRole, GuildInfo } from '@/lib/types'
+import type { BotConfig, ConversationMemory, UserRole, GuildInfo, KnowledgeDocument } from '@/lib/types'
 import { 
   Bot, 
   Settings, 
@@ -22,7 +22,12 @@ import {
   UserIcon,
   Server,
   Sparkles,
-  ChevronRight
+  ChevronRight,
+  BookOpen,
+  Upload,
+  FileText,
+  Eye,
+  X
 } from 'lucide-react'
 
 interface Props {
@@ -37,9 +42,10 @@ interface Props {
 export default function DashboardClient({ user, initialConfig, initialMemories, initialUserRoles, guilds, selectedGuildId }: Props) {
   const router = useRouter()
   const supabase = createClient()
+  const fileInputRef = useRef<HTMLInputElement>(null)
   
   // State
-  const [activeTab, setActiveTab] = useState<'instructions' | 'channels' | 'memory' | 'roles'>('instructions')
+  const [activeTab, setActiveTab] = useState<'instructions' | 'channels' | 'memory' | 'roles' | 'knowledge'>('instructions')
   const [saving, setSaving] = useState(false)
   const [message, setMessage] = useState<{ type: 'success' | 'error', text: string } | null>(null)
   const [currentGuildId, setCurrentGuildId] = useState(selectedGuildId)
@@ -62,6 +68,14 @@ Key behaviors:
   )
   const [memories, setMemories] = useState(initialMemories)
   const [userRoles, setUserRoles] = useState(initialUserRoles)
+  
+  // Knowledge state
+  const [knowledgeDocs, setKnowledgeDocs] = useState<KnowledgeDocument[]>([])
+  const [selectedDoc, setSelectedDoc] = useState<KnowledgeDocument | null>(null)
+  const [showDocModal, setShowDocModal] = useState(false)
+  const [newDocTitle, setNewDocTitle] = useState('')
+  const [newDocContent, setNewDocContent] = useState('')
+  const [uploadingFile, setUploadingFile] = useState(false)
 
   // Load data for selected guild
   const loadGuildData = async (guildId: string) => {
@@ -99,9 +113,33 @@ Key behaviors:
       .order('created_at', { ascending: true })
     
     setUserRoles(guildRoles || [])
+
+    // Fetch knowledge documents for this guild
+    const { data: guildDocs } = await supabase
+      .from('knowledge_documents')
+      .select('*')
+      .eq('guild_id', guildId)
+      .order('created_at', { ascending: false })
+      .limit(50)
+    
+    setKnowledgeDocs(guildDocs || [])
     
     setSaving(false)
   }
+
+  // Load knowledge on mount
+  useEffect(() => {
+    const loadKnowledge = async () => {
+      const { data } = await supabase
+        .from('knowledge_documents')
+        .select('*')
+        .eq('guild_id', currentGuildId)
+        .order('created_at', { ascending: false })
+        .limit(50)
+      setKnowledgeDocs(data || [])
+    }
+    loadKnowledge()
+  }, [currentGuildId, supabase])
 
   const handleGuildChange = async (guildId: string) => {
     setCurrentGuildId(guildId)
@@ -222,6 +260,151 @@ Key behaviors:
     await supabase.auth.signOut()
     router.push('/login')
     router.refresh()
+  }
+
+  // Knowledge handlers
+  const handleAddDocument = async () => {
+    if (!newDocTitle.trim() || !newDocContent.trim()) {
+      showMessage('error', 'Title and content are required')
+      return
+    }
+
+    setSaving(true)
+
+    const { error } = await supabase
+      .from('knowledge_documents')
+      .insert({
+        guild_id: currentGuildId,
+        title: newDocTitle,
+        content: newDocContent,
+        chunk_index: 0,
+        metadata: { total_chunks: 1 }
+      })
+
+    if (!error) {
+      showMessage('success', 'Document added to knowledge base')
+      setNewDocTitle('')
+      setNewDocContent('')
+      // Reload docs
+      const { data } = await supabase
+        .from('knowledge_documents')
+        .select('*')
+        .eq('guild_id', currentGuildId)
+        .order('created_at', { ascending: false })
+        .limit(50)
+      setKnowledgeDocs(data || [])
+    } else {
+      showMessage('error', 'Failed to add document')
+    }
+
+    setSaving(false)
+  }
+
+  const handleDeleteDocument = async (docId: string, docTitle: string) => {
+    setSaving(true)
+
+    // Delete all chunks with matching title
+    const { error } = await supabase
+      .from('knowledge_documents')
+      .delete()
+      .eq('guild_id', currentGuildId)
+      .ilike('title', `${docTitle}%`)
+
+    if (!error) {
+      setKnowledgeDocs(knowledgeDocs.filter(d => !d.title.startsWith(docTitle.replace(/ \(Part \d+\)$/, ''))))
+      showMessage('success', 'Document deleted')
+    } else {
+      showMessage('error', 'Failed to delete document')
+    }
+
+    setSaving(false)
+  }
+
+  const handleViewDocument = async (doc: KnowledgeDocument) => {
+    // Fetch full document content (all chunks)
+    const baseTitle = doc.title.replace(/ \(Part \d+\)$/, '')
+    const { data } = await supabase
+      .from('knowledge_documents')
+      .select('*')
+      .eq('guild_id', currentGuildId)
+      .ilike('title', `${baseTitle}%`)
+      .order('chunk_index')
+    
+    if (data && data.length > 0) {
+      const fullContent = data.map(d => d.content).join('\n\n')
+      setSelectedDoc({ ...data[0], content: fullContent })
+      setShowDocModal(true)
+    }
+  }
+
+  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0]
+    if (!file) return
+
+    const allowedTypes = ['text/plain', 'text/markdown', 'application/pdf']
+    if (!allowedTypes.includes(file.type) && !file.name.endsWith('.md') && !file.name.endsWith('.txt')) {
+      showMessage('error', 'Only TXT, MD, and PDF files are supported')
+      return
+    }
+
+    if (file.size > 10 * 1024 * 1024) {
+      showMessage('error', 'File too large. Maximum size is 10MB')
+      return
+    }
+
+    setUploadingFile(true)
+
+    try {
+      let content = ''
+      
+      if (file.type === 'application/pdf') {
+        showMessage('error', 'PDF upload is only available via Discord. Use /knowledge_upload command.')
+        setUploadingFile(false)
+        return
+      } else {
+        content = await file.text()
+      }
+
+      if (!content.trim()) {
+        showMessage('error', 'File appears to be empty')
+        setUploadingFile(false)
+        return
+      }
+
+      const title = file.name.replace(/\.[^/.]+$/, '') // Remove extension
+
+      const { error } = await supabase
+        .from('knowledge_documents')
+        .insert({
+          guild_id: currentGuildId,
+          title: title,
+          filename: file.name,
+          content: content,
+          chunk_index: 0,
+          metadata: { total_chunks: 1, uploaded_from: 'dashboard' }
+        })
+
+      if (!error) {
+        showMessage('success', `Uploaded: ${file.name}`)
+        // Reload docs
+        const { data } = await supabase
+          .from('knowledge_documents')
+          .select('*')
+          .eq('guild_id', currentGuildId)
+          .order('created_at', { ascending: false })
+          .limit(50)
+        setKnowledgeDocs(data || [])
+      } else {
+        showMessage('error', 'Failed to upload file')
+      }
+    } catch {
+      showMessage('error', 'Failed to read file')
+    }
+
+    setUploadingFile(false)
+    if (fileInputRef.current) {
+      fileInputRef.current.value = ''
+    }
   }
 
   return (
@@ -356,6 +539,20 @@ Key behaviors:
                   <span className="font-medium">Roles</span>
                 </div>
                 {activeTab === 'roles' && <ChevronRight className="w-4 h-4 text-blue-400" />}
+              </button>
+              <button
+                onClick={() => setActiveTab('knowledge')}
+                className={`w-full flex items-center justify-between px-4 py-3 rounded-xl transition-all duration-200 group ${
+                  activeTab === 'knowledge' 
+                    ? 'bg-gradient-to-r from-blue-500/10 to-violet-500/10 text-white' 
+                    : 'text-zinc-400 hover:text-white hover:bg-white/5'
+                }`}
+              >
+                <div className="flex items-center gap-3">
+                  <BookOpen className={`w-5 h-5 ${activeTab === 'knowledge' ? 'text-blue-400' : ''}`} />
+                  <span className="font-medium">Knowledge</span>
+                </div>
+                {activeTab === 'knowledge' && <ChevronRight className="w-4 h-4 text-blue-400" />}
               </button>
             </div>
 
@@ -674,10 +871,195 @@ Key behaviors:
                   </button>
                 </div>
               )}
+
+              {/* Knowledge Tab */}
+              {activeTab === 'knowledge' && (
+                <div className="space-y-8">
+                  <div>
+                    <h2 className="text-2xl font-semibold text-white tracking-tight mb-2">Knowledge Base</h2>
+                    <p className="text-zinc-500 text-sm">
+                      Add documents to your knowledge base. The bot will use these for RAG-powered responses.
+                    </p>
+                  </div>
+
+                  {/* Add New Document */}
+                  <div className="space-y-4">
+                    <h3 className="text-sm font-medium text-zinc-300">Add New Document</h3>
+                    <div className="space-y-4">
+                      <input
+                        type="text"
+                        value={newDocTitle}
+                        onChange={(e) => setNewDocTitle(e.target.value)}
+                        placeholder="Document Title"
+                        className="input-elegant w-full"
+                      />
+                      <textarea
+                        value={newDocContent}
+                        onChange={(e) => setNewDocContent(e.target.value)}
+                        placeholder="Document content..."
+                        rows={6}
+                        className="input-elegant w-full resize-none"
+                      />
+                      <div className="flex items-center gap-4">
+                        <button
+                          onClick={handleAddDocument}
+                          disabled={saving || !newDocTitle.trim() || !newDocContent.trim()}
+                          className="btn-primary"
+                        >
+                          {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
+                          Add Document
+                        </button>
+                        
+                        <div className="relative">
+                          <input
+                            ref={fileInputRef}
+                            type="file"
+                            accept=".txt,.md"
+                            onChange={handleFileUpload}
+                            className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
+                            disabled={uploadingFile}
+                            title="Upload a text or markdown file"
+                            aria-label="Upload a text or markdown file"
+                          />
+                          <button
+                            className="flex items-center gap-2 px-4 py-2 text-zinc-400 hover:text-white hover:bg-white/5 rounded-xl transition-all duration-200 border border-zinc-800"
+                            disabled={uploadingFile}
+                          >
+                            {uploadingFile ? <Loader2 className="w-4 h-4 animate-spin" /> : <Upload className="w-4 h-4" />}
+                            Upload File
+                          </button>
+                        </div>
+                      </div>
+                      <p className="text-xs text-zinc-600">
+                        Supports TXT and MD files. For PDF upload, use the <code className="text-zinc-500">/knowledge_upload</code> Discord command.
+                      </p>
+                    </div>
+                  </div>
+
+                  {/* Document List */}
+                  <div className="space-y-4">
+                    <div className="flex items-center justify-between">
+                      <h3 className="text-sm font-medium text-zinc-300">Documents ({knowledgeDocs.length})</h3>
+                      <button
+                        onClick={async () => {
+                          const { data } = await supabase
+                            .from('knowledge_documents')
+                            .select('*')
+                            .eq('guild_id', currentGuildId)
+                            .order('created_at', { ascending: false })
+                            .limit(50)
+                          setKnowledgeDocs(data || [])
+                        }}
+                        className="flex items-center gap-2 px-3 py-1.5 text-xs text-zinc-400 hover:text-white hover:bg-white/5 rounded-lg transition-all duration-200"
+                      >
+                        <RefreshCw className="w-3 h-3" />
+                        Refresh
+                      </button>
+                    </div>
+
+                    {knowledgeDocs.length === 0 ? (
+                      <div className="text-center py-12">
+                        <BookOpen className="w-12 h-12 text-zinc-700 mx-auto mb-4" />
+                        <p className="text-zinc-500">No documents in knowledge base</p>
+                        <p className="text-zinc-600 text-sm mt-1">Add documents above or use Discord commands</p>
+                      </div>
+                    ) : (
+                      <div className="space-y-3">
+                        {/* Group by title (remove part numbers for grouping) */}
+                        {Array.from(new Set(knowledgeDocs.map(d => d.title.replace(/ \(Part \d+\)$/, '')))).map((baseTitle) => {
+                          const docs = knowledgeDocs.filter(d => d.title.startsWith(baseTitle))
+                          const firstDoc = docs[0]
+                          const totalChunks = docs.length
+                          
+                          return (
+                            <div 
+                              key={baseTitle}
+                              className="p-4 glass-card rounded-xl flex items-center justify-between hover-lift"
+                            >
+                              <div className="flex items-center gap-4">
+                                <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-blue-500/20 to-violet-500/20 flex items-center justify-center">
+                                  <FileText className="w-5 h-5 text-blue-400" />
+                                </div>
+                                <div>
+                                  <p className="text-white font-medium">{baseTitle}</p>
+                                  <div className="flex items-center gap-3 text-xs text-zinc-600">
+                                    {firstDoc.filename && <span>{firstDoc.filename}</span>}
+                                    <span>{totalChunks} chunk{totalChunks > 1 ? 's' : ''}</span>
+                                    <span>{new Date(firstDoc.created_at).toLocaleDateString()}</span>
+                                  </div>
+                                </div>
+                              </div>
+                              <div className="flex items-center gap-2">
+                                <button
+                                  onClick={() => handleViewDocument(firstDoc)}
+                                  className="p-2 text-zinc-500 hover:text-blue-400 hover:bg-blue-500/10 rounded-lg transition-all duration-200"
+                                  title="View document"
+                                >
+                                  <Eye className="w-4 h-4" />
+                                </button>
+                                <button
+                                  onClick={() => handleDeleteDocument(firstDoc.id, baseTitle)}
+                                  className="p-2 text-zinc-500 hover:text-red-400 hover:bg-red-500/10 rounded-lg transition-all duration-200"
+                                  title="Delete document"
+                                  disabled={saving}
+                                >
+                                  <Trash2 className="w-4 h-4" />
+                                </button>
+                              </div>
+                            </div>
+                          )
+                        })}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
             </div>
           </main>
         </div>
       </div>
+
+      {/* Document View Modal */}
+      {showDocModal && selectedDoc && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm">
+          <div className="glass-card rounded-2xl w-full max-w-4xl max-h-[80vh] overflow-hidden flex flex-col">
+            <div className="flex items-center justify-between p-6 border-b border-white/5">
+              <div className="flex items-center gap-4">
+                <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-blue-500/20 to-violet-500/20 flex items-center justify-center">
+                  <FileText className="w-5 h-5 text-blue-400" />
+                </div>
+                <div>
+                  <h2 className="text-lg font-semibold text-white">{selectedDoc.title}</h2>
+                  {selectedDoc.filename && (
+                    <p className="text-xs text-zinc-500">{selectedDoc.filename}</p>
+                  )}
+                </div>
+              </div>
+              <button
+                onClick={() => setShowDocModal(false)}
+                className="p-2 text-zinc-500 hover:text-white hover:bg-white/5 rounded-lg transition-all duration-200"
+                title="Close"
+                aria-label="Close modal"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+            <div className="flex-1 overflow-auto p-6">
+              <pre className="text-sm text-zinc-300 whitespace-pre-wrap font-mono bg-zinc-900/50 rounded-xl p-4">
+                {selectedDoc.content}
+              </pre>
+            </div>
+            <div className="p-4 border-t border-white/5 flex justify-end">
+              <button
+                onClick={() => setShowDocModal(false)}
+                className="px-4 py-2 text-zinc-400 hover:text-white hover:bg-white/5 rounded-xl transition-all duration-200"
+              >
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }
