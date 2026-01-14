@@ -6,6 +6,9 @@ DasAI is a comprehensive, self-hostable Discord bot that brings the power of lar
 
 The project is built with a Python-based Discord bot, a Next.js admin panel, and integrates with Supabase for data persistence and Hugging Face for AI model inference.
 
+<img width="1920" height="1080" alt="image" src="https://github.com/user-attachments/assets/2364674d-475a-4551-8e56-50f734c3cfb1" />
+
+
 ## Table of Contents
 
 - [Features](#features)
