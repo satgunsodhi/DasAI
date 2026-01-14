@@ -179,26 +179,93 @@ async def search_knowledge_base(guild_id: str, query: str, match_count: int = 3)
     """Search knowledge base for relevant documents using semantic search (per-guild)."""
     if not supabase or not embedding_available:
         return []
-    
+
     # Generate embedding for the query
     query_embedding = await hf_embed(query)
     if not query_embedding:
         return []
-    
+
     try:
-        # Call the similarity search function with guild_id
+        # 1. Lower threshold, increase matches
         result = supabase.rpc('search_documents', {
             'p_guild_id': guild_id,
             'query_embedding': query_embedding,
-            'match_threshold': 0.5,
-            'match_count': match_count
+            'match_threshold': 0.35,  # Lowered for more recall
+            'match_count': 8  # Get more, will re-rank
         }).execute()
-        
-        if result.data and isinstance(result.data, list):
-            return [dict(row) for row in result.data]  # type: ignore
+
+        # Convert all keys to str if bytes (Supabase may return bytes keys)
+        def decode_dict(d):
+            if isinstance(d, dict):
+                return {k.decode() if isinstance(k, bytes) else k: v for k, v in d.items()}
+            return d
+        docs = [decode_dict(row) for row in result.data if isinstance(row, dict)] if result.data and isinstance(result.data, list) else []
+        if not docs:
+            return []
+
+        # 5. Semantic re-ranking (cosine similarity)
+        def cosine_similarity(a, b):
+            import numpy as np
+            a = np.array(a)
+            b = np.array(b)
+            return float(np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b)))
+
+        for doc in docs:
+            if not isinstance(doc, dict):
+                continue
+            doc_emb = doc.get('embedding')
+            if doc_emb:
+                try:
+                    doc['semantic_score'] = cosine_similarity(query_embedding, doc_emb)
+                except Exception:
+                    doc['semantic_score'] = doc.get('similarity', 0)
+            else:
+                doc['semantic_score'] = doc.get('similarity', 0)
+
+        # Sort by semantic_score (desc)
+        docs = [d for d in docs if isinstance(d, dict)]
+        def safe_score(d):
+            try:
+                return float(d.get('semantic_score', 0))
+            except Exception:
+                return 0.0
+        docs.sort(key=safe_score, reverse=True)
+
+        # 6. Highlight matched content (find best matching sentence)
+        import re
+        def best_snippet(text, query):
+            # Find the sentence with the most query word overlap
+            sentences = re.split(r'(?<=[.!?])\s+', text)
+            query_words = set(re.findall(r'\w+', query.lower()))
+            best = ''
+            best_score = 0
+            for sent in sentences:
+                sent_words = set(re.findall(r'\w+', sent.lower()))
+                score = len(query_words & sent_words)
+                if score > best_score:
+                    best = sent
+                    best_score = score
+            return best.strip() if best else (sentences[0].strip() if sentences else text[:200])
+
+        # 7. Add source metadata and highlight
+        improved = []
+        for doc in docs[:5]:  # Return top 5
+            if not isinstance(doc, dict):
+                continue
+            content = doc.get('content', '')
+            snippet = best_snippet(content, query)
+            improved.append({
+                'title': doc.get('title', 'Untitled'),
+                'filename': doc.get('filename', ''),
+                'created_at': doc.get('created_at', ''),
+                'similarity': doc.get('similarity', 0),
+                'semantic_score': doc.get('semantic_score', 0),
+                'snippet': snippet,
+                'content': content,
+            })
+        return improved
     except Exception as e:
         print(f'Knowledge search error: {e}')
-    
     return []
 
 
@@ -703,14 +770,23 @@ async def generate_ai_response(message: discord.Message, config: dict) -> str:
     # Search knowledge base for relevant context (RAG)
     knowledge_context = ""
     if embedding_available:
-        relevant_docs = await search_knowledge_base(guild_id, user_query, match_count=3)
+        relevant_docs = await search_knowledge_base(guild_id, user_query, match_count=5)
         if relevant_docs:
             knowledge_context = "\n\n📚 **Relevant Knowledge Base Context:**\n"
             for doc in relevant_docs:
                 title = doc.get('title', 'Untitled')
-                content = doc.get('content', '')[:500]  # Limit content length
                 similarity = doc.get('similarity', 0)
-                knowledge_context += f"\n[{title}] (relevance: {similarity:.0%}):\n{content}\n"
+                semantic_score = doc.get('semantic_score', 0)
+                filename = doc.get('filename', '')
+                created_at = doc.get('created_at', '')
+                snippet = doc.get('snippet', '')
+                # Show metadata, highlight snippet
+                knowledge_context += f"\n[{title}] (relevance: {similarity:.0%}, semantic: {semantic_score:.2f})"
+                if filename:
+                    knowledge_context += f" | File: {filename}"
+                if created_at:
+                    knowledge_context += f" | Added: {created_at}"
+                knowledge_context += f"\n➡️ {snippet}\n"
     
     # Check if we should do a web search
     web_context = ""
