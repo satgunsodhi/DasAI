@@ -345,13 +345,17 @@ async def remove_user_role(guild_id: str, user_id: str) -> bool:
 async def has_any_team_lead(guild_id: str) -> bool:
     """Check if the guild has any team lead registered."""
     if not supabase:
+        print('has_any_team_lead: supabase not configured')
         return False
     
     try:
+        print(f'has_any_team_lead: Checking guild_id={guild_id}')
         result = supabase.table('user_roles').select('id').eq('guild_id', guild_id).eq('role', 'team_lead').limit(1).execute()
-        return bool(result.data)
+        has_lead = bool(result.data)
+        print(f'has_any_team_lead: result={result.data}, has_lead={has_lead}')
+        return has_lead
     except Exception as e:
-        print(f'Error checking team lead: {e}')
+        print(f'has_any_team_lead: Error - {e}')
         return False
 
 
