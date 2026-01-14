@@ -21,11 +21,11 @@ except ImportError:
 
 # Web search
 try:
-    from duckduckgo_search import DDGS
+    from ddgs import DDGS
     web_search_available = True
 except ImportError:
     web_search_available = False
-    print('duckduckgo-search not installed. Web search will be disabled.')
+    print('ddgs not installed. Web search will be disabled.')
 
 # Load environment variables
 load_dotenv()
