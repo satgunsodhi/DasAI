@@ -121,44 +121,31 @@ Key behaviors:
       .map(c => c.trim())
       .filter(c => c.length > 0)
 
+    const guildId = currentGuildId || 'default'
+
     const configData = {
+      guild_id: guildId,
       bot_name: botName,
       system_instructions: systemInstructions,
       allowed_channels: channels,
       updated_at: new Date().toISOString()
     }
 
-    if (config?.id) {
-      // Update existing config
-      const { error } = await supabase
-        .from('bot_config')
-        .update(configData)
-        .eq('id', config.id)
+    // Use upsert to handle both insert and update cases
+    const { error } = await supabase
+      .from('bot_config')
+      .upsert(configData, { 
+        onConflict: 'guild_id',
+        ignoreDuplicates: false 
+      })
 
-      if (error) {
-        console.error('Update error:', error)
-        showMessage('error', 'Failed to save configuration')
-      } else {
-        showMessage('success', 'Configuration saved successfully!')
-      }
+    if (error) {
+      console.error('Upsert error:', error)
+      showMessage('error', `Failed to save configuration: ${error.message}`)
     } else {
-      // Insert new config - include required guild_id
-      const { error } = await supabase
-        .from('bot_config')
-        .insert([{ 
-          ...configData, 
-          id: crypto.randomUUID(),
-          guild_id: currentGuildId || 'default',
-          guild_name: null
-        }])
-
-      if (error) {
-        console.error('Insert error:', error)
-        showMessage('error', `Failed to create configuration: ${error.message}`)
-      } else {
-        showMessage('success', 'Configuration created successfully!')
-        router.refresh()
-      }
+      showMessage('success', 'Configuration saved successfully!')
+      // Reload config to get the id if it was a new insert
+      await loadGuildData(guildId)
     }
 
     setSaving(false)
