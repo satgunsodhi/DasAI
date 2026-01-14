@@ -285,15 +285,18 @@ async def get_user_role(guild_id: str, user_id: str) -> Optional[str]:
 async def set_user_role(guild_id: str, user_id: str, username: str, role: str) -> bool:
     """Set a user's role in the database."""
     if not supabase:
+        print('set_user_role: supabase not configured')
         return False
     
     try:
-        supabase.table('user_roles').upsert({
+        result = supabase.table('user_roles').upsert({
             'guild_id': guild_id,
             'user_id': user_id,
             'username': username,
             'role': role
         }, on_conflict='guild_id,user_id').execute()
+        
+        print(f'set_user_role: Upsert result for {username} ({user_id}) as {role}: {result}')
         
         # Update cache
         if guild_id not in role_cache:
