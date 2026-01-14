@@ -833,6 +833,36 @@ async def setup(interaction: discord.Interaction):
         await interaction.followup.send("❌ Failed to complete setup. Please try again.")
 
 
+@bot.tree.command(name='setup_reset', description='Reset server setup (clears all roles)')
+async def setup_reset(interaction: discord.Interaction):
+    """Reset the server setup by clearing all roles. Use with caution!"""
+    await interaction.response.defer()
+
+    if not supabase:
+        await interaction.followup.send("❌ Database not configured.")
+        return
+
+    guild_id = str(interaction.guild_id) if interaction.guild_id else ''
+    
+    # Only allow server admins to reset
+    if not interaction.user.guild_permissions.administrator:
+        await interaction.followup.send("❌ Only server administrators can reset setup.")
+        return
+    
+    try:
+        # Delete all roles for this guild
+        supabase.table('user_roles').delete().eq('guild_id', guild_id).execute()
+        
+        # Clear role cache for this guild
+        if guild_id in role_cache:
+            del role_cache[guild_id]
+        
+        await interaction.followup.send("✅ Server setup has been reset. Run `/setup` to register a new Team Lead.")
+    except Exception as e:
+        print(f'setup_reset error: {e}')
+        await interaction.followup.send(f"❌ Failed to reset: {e}")
+
+
 @bot.tree.command(name='role_assign', description='Assign a role to a user (Team Lead only)')
 @app_commands.describe(user='The user to assign a role to', role='The role to assign')
 @app_commands.choices(role=[
