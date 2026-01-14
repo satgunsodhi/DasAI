@@ -136,18 +136,25 @@ Key behaviors:
         .eq('id', config.id)
 
       if (error) {
+        console.error('Update error:', error)
         showMessage('error', 'Failed to save configuration')
       } else {
         showMessage('success', 'Configuration saved successfully!')
       }
     } else {
-      // Insert new config
+      // Insert new config - include required guild_id
       const { error } = await supabase
         .from('bot_config')
-        .insert([{ ...configData, id: crypto.randomUUID() }])
+        .insert([{ 
+          ...configData, 
+          id: crypto.randomUUID(),
+          guild_id: currentGuildId || 'default',
+          guild_name: null
+        }])
 
       if (error) {
-        showMessage('error', 'Failed to create configuration')
+        console.error('Insert error:', error)
+        showMessage('error', `Failed to create configuration: ${error.message}`)
       } else {
         showMessage('success', 'Configuration created successfully!')
         router.refresh()
