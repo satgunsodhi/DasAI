@@ -4,7 +4,7 @@ import { useState } from 'react'
 import { createClient } from '@/lib/supabase/client'
 import { useRouter } from 'next/navigation'
 import type { User } from '@supabase/supabase-js'
-import type { BotConfig, ConversationMemory } from '@/lib/types'
+import type { BotConfig, ConversationMemory, UserRole } from '@/lib/types'
 import { 
   Bot, 
   Settings, 
@@ -16,21 +16,25 @@ import {
   Trash2,
   RefreshCw,
   CheckCircle,
-  AlertCircle
+  AlertCircle,
+  Users,
+  Crown,
+  UserIcon
 } from 'lucide-react'
 
 interface Props {
   user: User
   initialConfig: BotConfig | null
   initialMemories: ConversationMemory[]
+  initialUserRoles: UserRole[]
 }
 
-export default function DashboardClient({ user, initialConfig, initialMemories }: Props) {
+export default function DashboardClient({ user, initialConfig, initialMemories, initialUserRoles }: Props) {
   const router = useRouter()
   const supabase = createClient()
   
   // State
-  const [activeTab, setActiveTab] = useState<'instructions' | 'channels' | 'memory'>('instructions')
+  const [activeTab, setActiveTab] = useState<'instructions' | 'channels' | 'memory' | 'roles'>('instructions')
   const [saving, setSaving] = useState(false)
   const [message, setMessage] = useState<{ type: 'success' | 'error', text: string } | null>(null)
   
@@ -50,6 +54,7 @@ Key behaviors:
     initialConfig?.allowed_channels?.join('\n') || ''
   )
   const [memories, setMemories] = useState(initialMemories)
+  const [userRoles, setUserRoles] = useState(initialUserRoles)
 
   const showMessage = (type: 'success' | 'error', text: string) => {
     setMessage({ type, text })
@@ -125,6 +130,42 @@ Key behaviors:
         setMemories([])
         showMessage('success', 'All conversation memories cleared')
       }
+    }
+
+    setSaving(false)
+  }
+
+  const handleDeleteRole = async (roleId: string) => {
+    setSaving(true)
+
+    const { error } = await supabase
+      .from('user_roles')
+      .delete()
+      .eq('id', roleId)
+
+    if (!error) {
+      setUserRoles(userRoles.filter(r => r.id !== roleId))
+      showMessage('success', 'User role removed')
+    } else {
+      showMessage('error', 'Failed to remove role')
+    }
+
+    setSaving(false)
+  }
+
+  const handleUpdateRole = async (roleId: string, newRole: 'team_lead' | 'member') => {
+    setSaving(true)
+
+    const { error } = await supabase
+      .from('user_roles')
+      .update({ role: newRole })
+      .eq('id', roleId)
+
+    if (!error) {
+      setUserRoles(userRoles.map(r => r.id === roleId ? { ...r, role: newRole } : r))
+      showMessage('success', 'Role updated')
+    } else {
+      showMessage('error', 'Failed to update role')
     }
 
     setSaving(false)
@@ -218,6 +259,17 @@ Key behaviors:
               >
                 <MessageSquare className="w-5 h-5" />
                 Memory Control
+              </button>
+              <button
+                onClick={() => setActiveTab('roles')}
+                className={`w-full flex items-center gap-3 px-4 py-3 rounded-lg transition ${
+                  activeTab === 'roles' 
+                    ? 'bg-indigo-600 text-white' 
+                    : 'text-gray-300 hover:bg-gray-700'
+                }`}
+              >
+                <Users className="w-5 h-5" />
+                User Roles
               </button>
             </div>
           </nav>
@@ -378,6 +430,101 @@ Key behaviors:
                           <p className="mt-2 text-xs text-gray-500">
                             Last updated: {new Date(memory.updated_at).toLocaleString()}
                           </p>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+
+                  <button
+                    onClick={() => router.refresh()}
+                    className="flex items-center gap-2 px-4 py-2 text-gray-300 hover:text-white hover:bg-gray-700 rounded-lg transition"
+                  >
+                    <RefreshCw className="w-4 h-4" />
+                    Refresh
+                  </button>
+                </div>
+              )}
+
+              {/* User Roles Tab */}
+              {activeTab === 'roles' && (
+                <div className="space-y-6">
+                  <div>
+                    <h2 className="text-xl font-semibold text-white mb-2">User Roles</h2>
+                    <p className="text-gray-400 text-sm">
+                      Manage team members and their permissions. Team Leads can manage the bot, while Members have basic usage rights.
+                    </p>
+                  </div>
+
+                  <div className="bg-gray-700/30 rounded-lg p-4 border border-gray-600">
+                    <h3 className="text-sm font-medium text-gray-300 mb-2">How Roles Work</h3>
+                    <ul className="text-sm text-gray-400 space-y-1">
+                      <li>👑 <strong>Team Lead:</strong> Can reset memory, manage channels, add/remove knowledge, assign roles</li>
+                      <li>👤 <strong>Member:</strong> Can use /ask, /ping, /status, and search knowledge</li>
+                      <li>💡 First user to run <code className="bg-gray-700 px-1 rounded">/setup</code> in Discord becomes Team Lead</li>
+                    </ul>
+                  </div>
+
+                  {userRoles.length === 0 ? (
+                    <div className="text-center py-12 text-gray-500">
+                      <Users className="w-12 h-12 mx-auto mb-4 opacity-50" />
+                      <p>No users registered yet</p>
+                      <p className="text-sm mt-1">Users can register using <code className="bg-gray-700 px-1 rounded">/setup</code> in Discord</p>
+                    </div>
+                  ) : (
+                    <div className="space-y-4">
+                      {/* Group by guild */}
+                      {Object.entries(
+                        userRoles.reduce((acc, role) => {
+                          if (!acc[role.guild_id]) acc[role.guild_id] = []
+                          acc[role.guild_id].push(role)
+                          return acc
+                        }, {} as Record<string, typeof userRoles>)
+                      ).map(([guildId, roles]) => (
+                        <div key={guildId} className="space-y-2">
+                          <h3 className="text-sm font-medium text-gray-400 flex items-center gap-2">
+                            <Hash className="w-4 h-4" />
+                            Server: {guildId}
+                          </h3>
+                          <div className="space-y-2">
+                            {roles.map((role) => (
+                              <div 
+                                key={role.id}
+                                className="p-4 bg-gray-700/50 rounded-lg border border-gray-600 flex items-center justify-between"
+                              >
+                                <div className="flex items-center gap-3">
+                                  {role.role === 'team_lead' ? (
+                                    <Crown className="w-5 h-5 text-yellow-500" />
+                                  ) : (
+                                    <UserIcon className="w-5 h-5 text-gray-400" />
+                                  )}
+                                  <div>
+                                    <p className="text-white font-medium">{role.username}</p>
+                                    <p className="text-xs text-gray-500">ID: {role.user_id}</p>
+                                  </div>
+                                </div>
+                                <div className="flex items-center gap-2">
+                                  <select
+                                    value={role.role}
+                                    onChange={(e) => handleUpdateRole(role.id, e.target.value as 'team_lead' | 'member')}
+                                    className="bg-gray-600 border border-gray-500 text-white text-sm rounded-lg px-3 py-1.5 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                                    disabled={saving}
+                                  >
+                                    <option value="team_lead">Team Lead</option>
+                                    <option value="member">Member</option>
+                                  </select>
+                                  <button
+                                    onClick={() => handleDeleteRole(role.id)}
+                                    className="p-1.5 text-gray-400 hover:text-red-400 hover:bg-gray-600 rounded transition"
+                                    title="Remove user"
+                                    aria-label="Remove user"
+                                    disabled={saving}
+                                  >
+                                    <Trash2 className="w-4 h-4" />
+                                  </button>
+                                </div>
+                              </div>
+                            ))}
+                          </div>
                         </div>
                       ))}
                     </div>

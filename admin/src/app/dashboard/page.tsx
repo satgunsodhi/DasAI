@@ -24,11 +24,18 @@ export default async function DashboardPage() {
     .order('updated_at', { ascending: false })
     .limit(10)
 
+  // Fetch user roles
+  const { data: userRoles } = await supabase
+    .from('user_roles')
+    .select('*')
+    .order('created_at', { ascending: true })
+
   return (
     <DashboardClient 
       user={user} 
       initialConfig={config} 
       initialMemories={memories || []} 
+      initialUserRoles={userRoles || []}
     />
   )
 }

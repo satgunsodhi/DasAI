@@ -14,8 +14,22 @@ CREATE TABLE IF NOT EXISTS bot_config (
     bot_name TEXT NOT NULL DEFAULT 'DasAI Assistant',
     system_instructions TEXT NOT NULL DEFAULT 'You are a helpful AI assistant.',
     allowed_channels TEXT[] DEFAULT '{}',
+    setup_complete BOOLEAN DEFAULT FALSE,
     created_at TIMESTAMPTZ DEFAULT NOW(),
     updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- User Roles Table (for role-based access control)
+-- Roles: 'team_lead' (full access), 'member' (basic usage)
+CREATE TABLE IF NOT EXISTS user_roles (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    guild_id TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    username TEXT NOT NULL,
+    role TEXT NOT NULL DEFAULT 'member' CHECK (role IN ('team_lead', 'member')),
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW(),
+    UNIQUE(guild_id, user_id)
 );
 
 -- Conversation Memory Table (for rolling summaries)
@@ -115,6 +129,9 @@ CREATE POLICY "Allow authenticated users full access to messages" ON messages
 CREATE POLICY "Allow authenticated users full access to knowledge_documents" ON knowledge_documents
     FOR ALL TO authenticated USING (true);
 
+CREATE POLICY "Allow authenticated users full access to user_roles" ON user_roles
+    FOR ALL TO authenticated USING (true);
+
 -- Policies for service role (Discord bot uses service role key)
 CREATE POLICY "Allow service role full access to bot_config" ON bot_config
     FOR ALL TO service_role USING (true);
@@ -128,9 +145,15 @@ CREATE POLICY "Allow service role full access to messages" ON messages
 CREATE POLICY "Allow service role full access to knowledge_documents" ON knowledge_documents
     FOR ALL TO service_role USING (true);
 
+CREATE POLICY "Allow service role full access to user_roles" ON user_roles
+    FOR ALL TO service_role USING (true);
+
+-- RLS for user_roles table
+ALTER TABLE user_roles ENABLE ROW LEVEL SECURITY;
+
 -- Insert default configuration
 -- Empty allowed_channels array means ALL channels are allowed
-INSERT INTO bot_config (bot_name, system_instructions, allowed_channels)
+INSERT INTO bot_config (bot_name, system_instructions, allowed_channels, setup_complete)
 VALUES (
     'DasAI Assistant',
     'You are a helpful AI assistant for a Discord server. Be friendly, concise, and helpful.
@@ -140,7 +163,8 @@ Key behaviors:
 - Be conversational but professional
 - If you don''t know something, say so
 - Keep responses concise unless detail is requested',
-    '{}'  -- Empty array = all channels allowed
+    '{}',  -- Empty array = all channels allowed
+    FALSE
 ) ON CONFLICT DO NOTHING;
 
 -- Function to update timestamp
@@ -159,4 +183,8 @@ CREATE TRIGGER update_bot_config_updated_at
 
 CREATE TRIGGER update_conversation_memory_updated_at
     BEFORE UPDATE ON conversation_memory
+    FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+
+CREATE TRIGGER update_user_roles_updated_at
+    BEFORE UPDATE ON user_roles
     FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();

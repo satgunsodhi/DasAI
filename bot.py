@@ -245,8 +245,107 @@ bot_config_cache = {
     'system_instructions': 'You are a helpful AI assistant.',
     'allowed_channels': [],
     'bot_name': 'DasAI Assistant',
+    'setup_complete': False,
     'last_fetch': 0
 }
+
+# Role cache per guild
+role_cache: Dict[str, Dict[str, str]] = {}  # guild_id -> {user_id -> role}
+
+
+async def get_user_role(guild_id: str, user_id: str) -> Optional[str]:
+    """Get a user's role from the database."""
+    if not supabase:
+        return None
+    
+    # Check cache first
+    if guild_id in role_cache and user_id in role_cache[guild_id]:
+        return role_cache[guild_id][user_id]
+    
+    try:
+        result = supabase.table('user_roles').select('role').eq('guild_id', guild_id).eq('user_id', user_id).limit(1).execute()
+        if result.data:
+            role = str(result.data[0].get('role', 'member'))
+            if guild_id not in role_cache:
+                role_cache[guild_id] = {}
+            role_cache[guild_id][user_id] = role
+            return role
+    except Exception as e:
+        print(f'Error fetching user role: {e}')
+    
+    return None
+
+
+async def set_user_role(guild_id: str, user_id: str, username: str, role: str) -> bool:
+    """Set a user's role in the database."""
+    if not supabase:
+        return False
+    
+    try:
+        supabase.table('user_roles').upsert({
+            'guild_id': guild_id,
+            'user_id': user_id,
+            'username': username,
+            'role': role
+        }, on_conflict='guild_id,user_id').execute()
+        
+        # Update cache
+        if guild_id not in role_cache:
+            role_cache[guild_id] = {}
+        role_cache[guild_id][user_id] = role
+        return True
+    except Exception as e:
+        print(f'Error setting user role: {e}')
+        return False
+
+
+async def remove_user_role(guild_id: str, user_id: str) -> bool:
+    """Remove a user's role from the database."""
+    if not supabase:
+        return False
+    
+    try:
+        supabase.table('user_roles').delete().eq('guild_id', guild_id).eq('user_id', user_id).execute()
+        
+        # Update cache
+        if guild_id in role_cache and user_id in role_cache[guild_id]:
+            del role_cache[guild_id][user_id]
+        return True
+    except Exception as e:
+        print(f'Error removing user role: {e}')
+        return False
+
+
+async def is_team_lead(guild_id: str, user_id: str) -> bool:
+    """Check if a user is a team lead."""
+    role = await get_user_role(guild_id, user_id)
+    return role == 'team_lead'
+
+
+async def has_any_team_lead(guild_id: str) -> bool:
+    """Check if the guild has any team lead registered."""
+    if not supabase:
+        return False
+    
+    try:
+        result = supabase.table('user_roles').select('id').eq('guild_id', guild_id).eq('role', 'team_lead').limit(1).execute()
+        return bool(result.data)
+    except Exception as e:
+        print(f'Error checking team lead: {e}')
+        return False
+
+
+async def get_guild_roles(guild_id: str) -> List[Dict[str, Any]]:
+    """Get all user roles for a guild."""
+    if not supabase:
+        return []
+    
+    try:
+        result = supabase.table('user_roles').select('*').eq('guild_id', guild_id).order('created_at').execute()
+        return [dict(row) for row in result.data] if result.data else []
+    except Exception as e:
+        print(f'Error fetching guild roles: {e}')
+        return []
 
 
 async def fetch_bot_config():
@@ -561,14 +660,238 @@ async def ask(interaction: discord.Interaction, question: str):
     await interaction.followup.send(answer)
 
 
+@bot.tree.command(name='memory_reset', description='Reset the conversation memory for this channel')
+async def memory_reset(interaction: discord.Interaction):
+    """Reset the rolling summary and message count for the current channel. Team Lead only."""
+    await interaction.response.defer()
+
+    if not supabase:
+        await interaction.followup.send("❌ Database not configured.")
+        return
+
+    # Check if user is team lead
+    guild_id = str(interaction.guild_id) if interaction.guild_id else ''
+    user_id = str(interaction.user.id)
+    
+    if not await is_team_lead(guild_id, user_id):
+        await interaction.followup.send("❌ Only Team Leads can reset conversation memory.")
+        return
+
+    channel_id = str(interaction.channel_id)
+    try:
+        # Upsert an empty memory for this channel
+        supabase.table('conversation_memory').upsert({
+            'channel_id': channel_id,
+            'summary': '',
+            'message_count': 0
+        }, on_conflict='channel_id').execute()
+
+        await interaction.followup.send("✅ Conversation memory reset for this channel.")
+    except Exception as e:
+        await interaction.followup.send(f"❌ Error: {e}")
+
+
+@bot.tree.command(name='allowlist_add', description='Allow this channel for bot responses')
+async def allowlist_add(interaction: discord.Interaction):
+    """Add the current channel to the allow-listed channels in bot_config. Team Lead only."""
+    await interaction.response.defer()
+
+    if not supabase:
+        await interaction.followup.send("❌ Database not configured.")
+        return
+
+    # Check if user is team lead
+    guild_id = str(interaction.guild_id) if interaction.guild_id else ''
+    user_id = str(interaction.user.id)
+    
+    if not await is_team_lead(guild_id, user_id):
+        await interaction.followup.send("❌ Only Team Leads can modify the allow-list.")
+        return
+
+    channel_id = str(interaction.channel_id)
+    try:
+        result = supabase.table('bot_config').select('id, allowed_channels').limit(1).execute()
+        if not result.data:
+            await interaction.followup.send("❌ No bot configuration found.")
+            return
+
+        row: Dict[str, Any] = dict(result.data[0])  # type: ignore
+        config_id = str(row.get('id'))
+        allowed = list(row.get('allowed_channels') or [])
+
+        if channel_id in allowed:
+            await interaction.followup.send("ℹ️ This channel is already allow-listed.")
+            return
+
+        allowed.append(channel_id)
+        supabase.table('bot_config').update({'allowed_channels': allowed}).eq('id', config_id).execute()
+        await interaction.followup.send("✅ Channel added to allow-list.")
+    except Exception as e:
+        await interaction.followup.send(f"❌ Error: {e}")
+
+
+@bot.tree.command(name='setup', description='Register as Team Lead (first user only)')
+async def setup(interaction: discord.Interaction):
+    """Register the first user as Team Lead for this server."""
+    await interaction.response.defer()
+
+    if not supabase:
+        await interaction.followup.send("❌ Database not configured.")
+        return
+
+    guild_id = str(interaction.guild_id) if interaction.guild_id else ''
+    user_id = str(interaction.user.id)
+    username = interaction.user.display_name
+
+    # Check if there's already a team lead
+    if await has_any_team_lead(guild_id):
+        await interaction.followup.send("❌ This server already has a Team Lead. Ask them to add you with `/role_assign`.")
+        return
+
+    # Register as team lead
+    success = await set_user_role(guild_id, user_id, username, 'team_lead')
+    
+    if success:
+        embed = discord.Embed(
+            title='🎉 Setup Complete!',
+            description=f'**{username}** is now the Team Lead for this server.',
+            color=discord.Color.green()
+        )
+        embed.add_field(name='What you can do:', value=(
+            '• `/role_assign @user` - Add team members\n'
+            '• `/role_remove @user` - Remove team members\n'
+            '• `/role_list` - View all roles\n'
+            '• `/memory_reset` - Clear conversation memory\n'
+            '• `/allowlist_add` - Allow bot in this channel\n'
+            '• `/knowledge_add` - Add to knowledge base'
+        ), inline=False)
+        await interaction.followup.send(embed=embed)
+    else:
+        await interaction.followup.send("❌ Failed to complete setup. Please try again.")
+
+
+@bot.tree.command(name='role_assign', description='Assign a role to a user (Team Lead only)')
+@app_commands.describe(user='The user to assign a role to', role='The role to assign')
+@app_commands.choices(role=[
+    app_commands.Choice(name='Team Lead', value='team_lead'),
+    app_commands.Choice(name='Member', value='member')
+])
+async def role_assign(interaction: discord.Interaction, user: discord.Member, role: app_commands.Choice[str]):
+    """Assign a role to a user. Team Lead only."""
+    await interaction.response.defer()
+
+    if not supabase:
+        await interaction.followup.send("❌ Database not configured.")
+        return
+
+    guild_id = str(interaction.guild_id) if interaction.guild_id else ''
+    caller_id = str(interaction.user.id)
+
+    # Check if caller is team lead
+    if not await is_team_lead(guild_id, caller_id):
+        await interaction.followup.send("❌ Only Team Leads can assign roles.")
+        return
+
+    target_id = str(user.id)
+    target_name = user.display_name
+
+    success = await set_user_role(guild_id, target_id, target_name, role.value)
+    
+    if success:
+        role_emoji = '👑' if role.value == 'team_lead' else '👤'
+        await interaction.followup.send(f"{role_emoji} **{target_name}** is now a **{role.name}**.")
+    else:
+        await interaction.followup.send("❌ Failed to assign role. Please try again.")
+
+
+@bot.tree.command(name='role_remove', description='Remove a user\'s role (Team Lead only)')
+@app_commands.describe(user='The user to remove')
+async def role_remove(interaction: discord.Interaction, user: discord.Member):
+    """Remove a user's role from the system. Team Lead only."""
+    await interaction.response.defer()
+
+    if not supabase:
+        await interaction.followup.send("❌ Database not configured.")
+        return
+
+    guild_id = str(interaction.guild_id) if interaction.guild_id else ''
+    caller_id = str(interaction.user.id)
+    target_id = str(user.id)
+
+    # Check if caller is team lead
+    if not await is_team_lead(guild_id, caller_id):
+        await interaction.followup.send("❌ Only Team Leads can remove roles.")
+        return
+
+    # Prevent removing self if you're the only team lead
+    if target_id == caller_id:
+        # Check if there are other team leads
+        roles = await get_guild_roles(guild_id)
+        team_leads = [r for r in roles if r.get('role') == 'team_lead']
+        if len(team_leads) <= 1:
+            await interaction.followup.send("❌ You can't remove yourself - you're the only Team Lead!")
+            return
+
+    success = await remove_user_role(guild_id, target_id)
+    
+    if success:
+        await interaction.followup.send(f"✅ Removed **{user.display_name}** from the role system.")
+    else:
+        await interaction.followup.send("❌ Failed to remove role. Please try again.")
+
+
+@bot.tree.command(name='role_list', description='List all users and their roles')
+async def role_list(interaction: discord.Interaction):
+    """List all users with assigned roles in this server."""
+    await interaction.response.defer()
+
+    if not supabase:
+        await interaction.followup.send("❌ Database not configured.")
+        return
+
+    guild_id = str(interaction.guild_id) if interaction.guild_id else ''
+    roles = await get_guild_roles(guild_id)
+
+    if not roles:
+        await interaction.followup.send("ℹ️ No roles assigned yet. Use `/setup` to get started.")
+        return
+
+    embed = discord.Embed(
+        title='👥 Team Roles',
+        color=discord.Color.blue()
+    )
+
+    team_leads = [r for r in roles if r.get('role') == 'team_lead']
+    members = [r for r in roles if r.get('role') == 'member']
+
+    if team_leads:
+        lead_list = '\n'.join([f"👑 {r.get('username', 'Unknown')}" for r in team_leads])
+        embed.add_field(name='Team Leads', value=lead_list, inline=False)
+
+    if members:
+        member_list = '\n'.join([f"👤 {r.get('username', 'Unknown')}" for r in members])
+        embed.add_field(name='Members', value=member_list, inline=False)
+
+    embed.set_footer(text=f'Total: {len(roles)} user(s)')
+    await interaction.followup.send(embed=embed)
+
+
 @bot.tree.command(name='knowledge_add', description='Add a document to the knowledge base')
 @app_commands.describe(title='Title for the document', content='The content to add')
 async def knowledge_add(interaction: discord.Interaction, title: str, content: str):
-    """Add a document to the knowledge base."""
+    """Add a document to the knowledge base. Team Lead only."""
     await interaction.response.defer()
     
     if not supabase:
         await interaction.followup.send("❌ Database not configured.")
+        return
+    
+    # Check if user is team lead
+    guild_id = str(interaction.guild_id) if interaction.guild_id else ''
+    user_id = str(interaction.user.id)
+    
+    if not await is_team_lead(guild_id, user_id):
+        await interaction.followup.send("❌ Only Team Leads can add to the knowledge base.")
         return
     
     if not embedding_available:
@@ -651,11 +974,19 @@ async def knowledge_list(interaction: discord.Interaction):
 @bot.tree.command(name='knowledge_delete', description='Delete a document from the knowledge base')
 @app_commands.describe(title='Title of the document to delete')
 async def knowledge_delete(interaction: discord.Interaction, title: str):
-    """Delete a document from the knowledge base."""
+    """Delete a document from the knowledge base. Team Lead only."""
     await interaction.response.defer()
     
     if not supabase:
         await interaction.followup.send("❌ Database not configured.")
+        return
+    
+    # Check if user is team lead
+    guild_id = str(interaction.guild_id) if interaction.guild_id else ''
+    user_id = str(interaction.user.id)
+    
+    if not await is_team_lead(guild_id, user_id):
+        await interaction.followup.send("❌ Only Team Leads can delete from the knowledge base.")
         return
     
     try:
