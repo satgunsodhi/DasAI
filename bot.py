@@ -19,6 +19,14 @@ except ImportError:
     pdf_available = False
     print('PyPDF2 not installed. PDF upload will be disabled.')
 
+# Web search
+try:
+    from duckduckgo_search import DDGS
+    web_search_available = True
+except ImportError:
+    web_search_available = False
+    print('duckduckgo-search not installed. Web search will be disabled.')
+
 # Load environment variables
 load_dotenv()
 TOKEN = os.getenv('DISCORD_TOKEN')
@@ -194,6 +202,43 @@ async def search_knowledge_base(guild_id: str, query: str, match_count: int = 3)
     return []
 
 
+async def web_search(query: str, max_results: int = 5) -> List[Dict[str, str]]:
+    """Search the web using DuckDuckGo and return results."""
+    if not web_search_available:
+        return []
+    
+    try:
+        with DDGS() as ddgs:
+            results = list(ddgs.text(query, max_results=max_results))
+            return [
+                {
+                    'title': r.get('title', ''),
+                    'url': r.get('href', ''),
+                    'snippet': r.get('body', '')
+                }
+                for r in results
+            ]
+    except Exception as e:
+        print(f'Web search error: {e}')
+        return []
+
+
+async def web_search_with_summary(query: str, max_results: int = 5) -> str:
+    """Search the web and return a formatted summary for the AI to use."""
+    results = await web_search(query, max_results)
+    
+    if not results:
+        return "No web search results found."
+    
+    summary_parts = [f"Web search results for '{query}':\n"]
+    for i, r in enumerate(results, 1):
+        summary_parts.append(f"{i}. **{r['title']}**")
+        summary_parts.append(f"   URL: {r['url']}")
+        summary_parts.append(f"   {r['snippet']}\n")
+    
+    return '\n'.join(summary_parts)
+
+
 async def add_document_to_knowledge_base(guild_id: str, title: str, content: str, filename: Optional[str] = None) -> bool:
     """Add a document to the knowledge base with embedding (per-guild)."""
     if not supabase:
@@ -286,8 +331,8 @@ async def get_knowledge_document(guild_id: str, doc_id: str) -> Optional[Dict[st
     
     try:
         result = supabase.table('knowledge_documents').select('*').eq('guild_id', guild_id).eq('id', doc_id).single().execute()
-        if result.data:
-            return dict(result.data)
+        if result.data and isinstance(result.data, dict):
+            return dict(result.data)  # type: ignore
     except Exception as e:
         print(f'Error fetching document: {e}')
     return None
@@ -300,8 +345,8 @@ async def get_knowledge_documents(guild_id: str, limit: int = 50) -> List[Dict[s
     
     try:
         result = supabase.table('knowledge_documents').select('id, title, filename, created_at, chunk_index, metadata').eq('guild_id', guild_id).order('created_at', desc=True).limit(limit).execute()
-        if result.data:
-            return [dict(row) for row in result.data]
+        if result.data and isinstance(result.data, list):
+            return [dict(row) for row in result.data]  # type: ignore
     except Exception as e:
         print(f'Error fetching documents: {e}')
     return []
@@ -567,8 +612,42 @@ async def save_message(guild_id: str, channel_id: str, user_id: str, username: s
         print(f'Error saving message: {e}')
 
 
+async def should_web_search(query: str) -> bool:
+    """Determine if a query would benefit from web search."""
+    # Keywords that suggest current/factual information is needed
+    search_triggers = [
+        'latest', 'recent', 'current', 'today', 'yesterday', 'news',
+        'what is', 'who is', 'when is', 'where is', 'how to',
+        'price of', 'weather', 'stock', 'score', 'result',
+        'search for', 'look up', 'find out', 'search the web',
+        'google', 'research', '2024', '2025', '2026',
+        'happening', 'update', 'released', 'announced'
+    ]
+    
+    query_lower = query.lower()
+    
+    # Check for explicit search request
+    if query_lower.startswith(('search:', 'search ', 'look up:', 'google:')):
+        return True
+    
+    # Check for trigger keywords
+    for trigger in search_triggers:
+        if trigger in query_lower:
+            return True
+    
+    # Check for questions about facts/events
+    question_starters = ['what', 'who', 'when', 'where', 'why', 'how', 'is there', 'are there', 'did', 'does', 'will']
+    first_word = query_lower.split()[0] if query_lower.split() else ''
+    if first_word in question_starters:
+        # Additional heuristic: if asking about specific things that change
+        if any(word in query_lower for word in ['president', 'ceo', 'price', 'version', 'release', 'event']):
+            return True
+    
+    return False
+
+
 async def generate_ai_response(message: discord.Message, config: dict) -> str:
-    """Generate AI response using Hugging Face with RAG context."""
+    """Generate AI response using Hugging Face with RAG context and optional web search."""
     if not hf_available:
         return "AI is not configured. Please set HF_API_KEY."
     
@@ -591,11 +670,32 @@ async def generate_ai_response(message: discord.Message, config: dict) -> str:
                 similarity = doc.get('similarity', 0)
                 knowledge_context += f"\n[{title}] (relevance: {similarity:.0%}):\n{content}\n"
     
+    # Check if we should do a web search
+    web_context = ""
+    searched_web = False
+    if web_search_available and await should_web_search(user_query):
+        searched_web = True
+        # Extract the search query (remove "search:" prefix if present)
+        search_query = user_query
+        for prefix in ['search:', 'search ', 'look up:', 'google:']:
+            if user_query.lower().startswith(prefix):
+                search_query = user_query[len(prefix):].strip()
+                break
+        
+        web_results = await web_search(search_query, max_results=4)
+        if web_results:
+            web_context = "\n\n🔍 **Web Search Results:**\n"
+            for i, r in enumerate(web_results, 1):
+                web_context += f"{i}. **{r['title']}**\n   {r['snippet']}\n   Source: {r['url']}\n\n"
+    
     # Build system prompt
     system_prompt = config['system_instructions']
     
     if knowledge_context:
         system_prompt += f"\n\nUse the following knowledge base context to help answer questions when relevant:{knowledge_context}"
+    
+    if web_context:
+        system_prompt += f"\n\nUse these web search results to provide accurate, up-to-date information. Cite sources when helpful:{web_context}"
     
     if memory:
         system_prompt += f"\n\nConversation context:\n{memory}"
@@ -621,7 +721,13 @@ async def generate_ai_response(message: discord.Message, config: dict) -> str:
     messages.extend(recent_messages[-6:])  # Last 6 messages for context
     messages.append({'role': 'user', 'content': f"{message.author.display_name}: {user_query}"})
     
-    return await hf_chat(messages)
+    response = await hf_chat(messages)
+    
+    # Add indicator if web search was used
+    if searched_web and web_results:
+        response = "🔍 *Searched the web*\n\n" + response
+    
+    return response
 
 
 @bot.event
@@ -823,6 +929,92 @@ async def ask(interaction: discord.Interaction, question: str):
         answer = answer[:1997] + '...'
     
     await interaction.followup.send(answer)
+
+
+@bot.tree.command(name='web_search', description='Search the web for information')
+@app_commands.describe(query='What to search for')
+async def slash_web_search(interaction: discord.Interaction, query: str):
+    """Search the web using DuckDuckGo."""
+    await interaction.response.defer()
+    
+    if not web_search_available:
+        await interaction.followup.send("❌ Web search is not available. Install duckduckgo-search package.")
+        return
+    
+    results = await web_search(query, max_results=5)
+    
+    if not results:
+        await interaction.followup.send(f"No results found for: **{query}**")
+        return
+    
+    embed = discord.Embed(
+        title=f'🔍 Web Search: "{query}"',
+        color=discord.Color.blue()
+    )
+    
+    for r in results[:5]:
+        title = r['title'][:100] if r['title'] else 'No title'
+        snippet = r['snippet'][:200] + '...' if len(r['snippet']) > 200 else r['snippet']
+        embed.add_field(
+            name=title,
+            value=f"{snippet}\n[Link]({r['url']})",
+            inline=False
+        )
+    
+    await interaction.followup.send(embed=embed)
+
+
+@bot.tree.command(name='research', description='Research a topic using web search and AI summary')
+@app_commands.describe(topic='The topic to research')
+async def research(interaction: discord.Interaction, topic: str):
+    """Research a topic by searching the web and providing an AI-powered summary."""
+    await interaction.response.defer()
+    
+    if not web_search_available:
+        await interaction.followup.send("❌ Web search is not available. Install duckduckgo-search package.")
+        return
+    
+    if not hf_available:
+        await interaction.followup.send("❌ AI is not configured. Set HF_API_KEY in environment.")
+        return
+    
+    # Get web search results
+    results = await web_search(topic, max_results=5)
+    
+    if not results:
+        await interaction.followup.send(f"No web results found for: **{topic}**")
+        return
+    
+    # Build context from search results
+    search_context = f"Web search results for '{topic}':\n\n"
+    for i, r in enumerate(results, 1):
+        search_context += f"{i}. {r['title']}\n   {r['snippet']}\n   Source: {r['url']}\n\n"
+    
+    # Get guild config for system instructions
+    guild_id = str(interaction.guild_id) if interaction.guild_id else ''
+    guild_name = interaction.guild.name if interaction.guild else None
+    config = await fetch_bot_config(guild_id, guild_name)
+    
+    # Ask AI to summarize
+    messages = [
+        {'role': 'system', 'content': f"{config['system_instructions']}\n\nYou are researching a topic. Use the provided web search results to give a helpful, accurate summary. Cite sources when relevant."},
+        {'role': 'user', 'content': f"Research topic: {topic}\n\n{search_context}\n\nPlease provide a helpful summary of what you found about this topic."}
+    ]
+    
+    summary = await hf_chat(messages)
+    
+    # Create embed
+    embed = discord.Embed(
+        title=f'📚 Research: {topic}',
+        description=summary[:4000] if len(summary) > 4000 else summary,
+        color=discord.Color.green()
+    )
+    
+    # Add sources
+    sources = '\n'.join([f"• [{r['title'][:50]}...]({r['url']})" for r in results[:3]])
+    embed.add_field(name='Sources', value=sources, inline=False)
+    
+    await interaction.followup.send(embed=embed)
 
 
 @bot.tree.command(name='memory_reset', description='Reset the conversation memory for this channel')
@@ -1283,15 +1475,15 @@ async def knowledge_view(interaction: discord.Interaction, title: str):
         # Search for document by title
         result = supabase.table('knowledge_documents').select('*').eq('guild_id', guild_id).ilike('title', f'%{title}%').order('chunk_index').execute()
         
-        if not result.data:
+        if not result.data or not isinstance(result.data, list):
             await interaction.followup.send(f"❌ No document found matching: **{title}**")
             return
         
         # Combine all chunks
-        docs = [dict(row) for row in result.data]
-        full_content = '\n\n'.join(doc.get('content', '') for doc in docs)
-        doc_title = docs[0].get('title', 'Untitled')
-        doc_filename = docs[0].get('filename', '')
+        docs: List[Dict[str, Any]] = [dict(row) for row in result.data]  # type: ignore
+        full_content = '\n\n'.join(str(doc.get('content', '')) for doc in docs)
+        doc_title = str(docs[0].get('title', 'Untitled'))
+        doc_filename = str(docs[0].get('filename', ''))
         
         # Create embed
         embed = discord.Embed(
