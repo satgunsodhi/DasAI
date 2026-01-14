@@ -244,15 +244,18 @@ async def add_document_to_knowledge_base(guild_id: str, title: str, content: str
     if not supabase:
         return False
     
+    # Remove null bytes (\u0000) from content
+    content = content.replace('\u0000', '').replace('\x00', '')
+
     # Split content into chunks if too long (max ~500 tokens per chunk)
     max_chunk_size = 2000  # characters
     chunks = []
-    
+
     if len(content) > max_chunk_size:
         # Simple chunking by paragraphs
         paragraphs = content.split('\n\n')
         current_chunk = ""
-        
+
         for para in paragraphs:
             if len(current_chunk) + len(para) < max_chunk_size:
                 current_chunk += para + "\n\n"
@@ -260,7 +263,7 @@ async def add_document_to_knowledge_base(guild_id: str, title: str, content: str
                 if current_chunk:
                     chunks.append(current_chunk.strip())
                 current_chunk = para + "\n\n"
-        
+
         if current_chunk:
             chunks.append(current_chunk.strip())
     else:
