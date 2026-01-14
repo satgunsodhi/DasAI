@@ -845,7 +845,7 @@ async def setup_reset(interaction: discord.Interaction):
     guild_id = str(interaction.guild_id) if interaction.guild_id else ''
     
     # Only allow server admins to reset
-    if not interaction.user.guild_permissions.administrator:
+    if not isinstance(interaction.user, discord.Member) or not interaction.user.guild_permissions.administrator:
         await interaction.followup.send("❌ Only server administrators can reset setup.")
         return
     
