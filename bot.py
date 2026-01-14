@@ -613,34 +613,73 @@ async def save_message(guild_id: str, channel_id: str, user_id: str, username: s
 
 
 async def should_web_search(query: str) -> bool:
-    """Determine if a query would benefit from web search."""
-    # Keywords that suggest current/factual information is needed
-    search_triggers = [
-        'latest', 'recent', 'current', 'today', 'yesterday', 'news',
-        'what is', 'who is', 'when is', 'where is', 'how to',
-        'price of', 'weather', 'stock', 'score', 'result',
-        'search for', 'look up', 'find out', 'search the web',
-        'google', 'research', '2024', '2025', '2026',
-        'happening', 'update', 'released', 'announced'
-    ]
-    
+    """Determine if a query would benefit from web search using AI classification."""
     query_lower = query.lower()
     
-    # Check for explicit search request
-    if query_lower.startswith(('search:', 'search ', 'look up:', 'google:')):
+    # Quick check: explicit search request (skip AI call)
+    if query_lower.startswith(('search:', 'search ', 'look up:', 'google:', 'research ')):
         return True
     
-    # Check for trigger keywords
-    for trigger in search_triggers:
+    # Quick check: obvious real-time keywords (skip AI call for efficiency)
+    obvious_triggers = ['news', 'weather', 'stock price', 'score', '2025', '2026']
+    for trigger in obvious_triggers:
         if trigger in query_lower:
             return True
     
-    # Check for questions about facts/events
-    question_starters = ['what', 'who', 'when', 'where', 'why', 'how', 'is there', 'are there', 'did', 'does', 'will']
-    first_word = query_lower.split()[0] if query_lower.split() else ''
-    if first_word in question_starters:
-        # Additional heuristic: if asking about specific things that change
-        if any(word in query_lower for word in ['president', 'ceo', 'price', 'version', 'release', 'event']):
+    # Use AI to classify if the query needs web search
+    if hf_available and hf_client is not None:
+        try:
+            classification_prompt = """You are a classifier that determines if a user query requires real-time web search.
+
+                                        Answer ONLY "YES" or "NO".
+
+                                        Answer YES if the query:
+                                        - Asks about current events, news, or recent happenings
+                                        - Asks about prices, stocks, weather, or live data
+                                        - Asks "who is" about a person (to get current info)
+                                        - Asks about something that changes frequently
+                                        - Asks about specific dates, releases, or announcements
+                                        - Would benefit from up-to-date information
+
+                                        Answer NO if the query:
+                                        - Is about general knowledge, concepts, or definitions
+                                        - Asks for coding help or technical explanations
+                                        - Is conversational or personal
+                                        - Asks about historical facts that don't change
+                                        - Is a creative writing or hypothetical question
+
+                                        Query: """ + query + """
+
+                                        Answer (YES or NO):"""
+
+            client = hf_client  # Local variable for lambda capture
+            loop = asyncio.get_event_loop()
+            response = await loop.run_in_executor(
+                None,
+                lambda: client.chat_completion(
+                    messages=[{'role': 'user', 'content': classification_prompt}],
+                    model=HF_MODEL,
+                    max_tokens=5,
+                    temperature=0.1
+                )
+            )
+            
+            if response and response.choices:
+                content = response.choices[0].message.content
+                if content:
+                    answer = content.strip().upper()
+                    return answer.startswith('YES')
+        except Exception as e:
+            print(f'Web search classification error: {e}')
+            # Fall back to keyword matching on error
+    
+    # Fallback: keyword-based detection if AI unavailable
+    fallback_triggers = [
+        'latest', 'recent', 'current', 'today', 'price of',
+        'who is', 'what is the current', 'happening', 'released'
+    ]
+    for trigger in fallback_triggers:
+        if trigger in query_lower:
             return True
     
     return False
