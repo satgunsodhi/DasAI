@@ -261,28 +261,41 @@ def get_default_config() -> Dict[str, Any]:
 async def get_user_role(guild_id: str, user_id: str) -> Optional[str]:
     """Get a user's role from the database."""
     if not supabase:
+        print(f'get_user_role: supabase not configured')
         return None
     
     # Check cache first
     if guild_id in role_cache and user_id in role_cache[guild_id]:
-        return role_cache[guild_id][user_id]
+        cached_role = role_cache[guild_id][user_id]
+        print(f'get_user_role: Cache hit for {user_id} in guild {guild_id}: {cached_role}')
+        return cached_role
     
     try:
+        print(f'get_user_role: Querying DB for user_id={user_id}, guild_id={guild_id}')
         result = supabase.table('user_roles').select('role').eq('guild_id', guild_id).eq('user_id', user_id).limit(1).execute()
+        print(f'get_user_role: DB result: {result.data}')
         if result.data:
             row: Dict[str, Any] = dict(result.data[0])  # type: ignore
             role = str(row.get('role', 'member'))
             if guild_id not in role_cache:
                 role_cache[guild_id] = {}
             role_cache[guild_id][user_id] = role
+            print(f'get_user_role: Found role {role} for user {user_id}')
             return role
+        else:
+            print(f'get_user_role: No role found for user {user_id} in guild {guild_id}')
     except Exception as e:
         print(f'Error fetching user role: {e}')
     
     return None
 
 
-async def set_user_role(guild_id: str, user_id: str, username: str, role: str) -> bool:
+async def is_team_lead(guild_id: str, user_id: str) -> bool:
+    """Check if a user is a team lead."""
+    role = await get_user_role(guild_id, user_id)
+    is_lead = role == 'team_lead'
+    print(f'is_team_lead: user_id={user_id}, guild_id={guild_id}, role={role}, is_lead={is_lead}')
+    return is_lead
     """Set a user's role in the database."""
     if not supabase:
         print('set_user_role: supabase not configured')
